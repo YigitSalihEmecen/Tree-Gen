@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TreeGen — Procedural Tree Generator</title>
+<meta name="description" content="Generate real 3D tree models in the browser from botanical parameters. Nothing is an asset — geometry, bark and leaves are all computed. Download as GLB, OBJ or STL.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🌳</text></svg>">
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.186.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.186.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+
+<div class="app">
+  <aside class="panel" id="panel">
+    <button class="sheet-grip" id="grip" aria-label="Expand controls"></button>
+
+    <header class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 22V9M12 13 7.5 8.5M12 11l4-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12 2.5c3.6 0 6.5 2.7 6.5 6 0 1.5-.6 2.9-1.6 4 .7.7 1.1 1.6 1.1 2.6 0 2.2-1.9 4-4.3 4H10.3C7.9 19.1 6 17.3 6 15.1c0-1 .4-1.9 1.1-2.6A5.8 5.8 0 0 1 5.5 8.5c0-3.3 2.9-6 6.5-6Z" stroke="currentColor" stroke-width="1.4"/></svg>
+      </div>
+      <div class="brand-text">
+        <h1>TreeGen</h1>
+        <p>Procedural tree studio</p>
+      </div>
+      <button class="icon-btn" id="collapse" title="Hide panel" aria-label="Hide panel">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </header>
+
+    <div class="panel-scroll" id="controls"><!-- built by app.js --></div>
+
+    <footer class="panel-foot">
+      <div class="foot-row">
+        <button class="btn btn-ghost" id="reseed" title="Same species, new random seed">
+          <svg viewBox="0 0 24 24" fill="none"><rect x="3.5" y="3.5" width="17" height="17" rx="4.5" stroke="currentColor" stroke-width="1.5"/><circle cx="8.6" cy="8.6" r="1.25" fill="currentColor"/><circle cx="15.4" cy="15.4" r="1.25" fill="currentColor"/><circle cx="15.4" cy="8.6" r="1.25" fill="currentColor"/><circle cx="8.6" cy="15.4" r="1.25" fill="currentColor"/></svg>
+          New seed
+        </button>
+        <button class="btn btn-wild" id="randomize" title="Randomise every parameter">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M4 7h3.2l9.6 10H20M4 17h3.2l2.4-2.6M20 7h-3.2l-2.4 2.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M17.6 4.6 20 7l-2.4 2.4M17.6 14.6 20 17l-2.4 2.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Randomise
+        </button>
+      </div>
+      <div class="foot-row foot-row-single">
+        <div class="export">
+          <button class="btn btn-primary" id="download">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Download
+          </button>
+          <div class="menu" id="download-menu" hidden>
+            <button data-fmt="glb"><b>GLB</b><span>glTF binary, with materials</span></button>
+            <button data-fmt="obj"><b>OBJ</b><span>Wavefront geometry</span></button>
+            <button data-fmt="stl"><b>STL</b><span>Binary mesh for printing</span></button>
+            <button data-fmt="png"><b>PNG</b><span>Render of the viewport</span></button>
+            <button data-fmt="json"><b>JSON</b><span>Parameter set</span></button>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </aside>
+
+  <main class="stage">
+    <canvas id="view"></canvas>
+
+    <button class="icon-btn floating show-panel" id="expand" title="Show panel" aria-label="Show panel">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+
+    <div class="hud hud-title">
+      <span class="tag" id="hud-species">Quaking Aspen</span>
+      <span class="tag mono" id="hud-seed">seed 1</span>
+    </div>
+
+    <div class="toolbar">
+      <button class="icon-btn" id="t-info" title="About TreeGen" aria-label="About TreeGen">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/><path d="M12 11v5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.1" fill="currentColor"/></svg>
+      </button>
+      <span class="tool-sep" aria-hidden="true"></span>
+      <button class="icon-btn" id="t-theme" title="Toggle theme" aria-label="Toggle theme">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="1.5"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+      <button class="icon-btn" id="t-spin" title="Auto-rotate" aria-label="Auto-rotate" data-on="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M20 12a8 8 0 1 1-2.3-5.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M20 3v4h-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="icon-btn" id="t-wind" title="Wind" aria-label="Wind" data-on="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M3 8h11a3 3 0 1 0-3-3M3 12h14a3 3 0 1 1-3 3M3 16h7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <button class="icon-btn" id="t-wire" title="Wireframe" aria-label="Wireframe">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 3 21 8v8l-9 5-9-5V8l9-5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m3 8 9 5 9-5M12 13v8" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="icon-btn" id="t-leaves" title="Toggle foliage" aria-label="Toggle foliage" data-on="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M5 19c0-8 5-13 14-14 1 9-4 15-11 15-1.6 0-3 0-3-1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M6 18c3-5 6-7 10-8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+
+    <div class="hud stats mono" id="stats">—</div>
+    <div class="working" id="working" hidden><span></span>growing</div>
+  </main>
+</div>
+
+<dialog class="modal" id="info">
+  <header class="modal-head">
+    <div>
+      <h2>TreeGen</h2>
+      <p>Procedural 3D tree generation in the browser</p>
+    </div>
+    <button class="icon-btn" id="info-close" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+    </button>
+  </header>
+
+  <div class="modal-tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-tab="about">About</button>
+    <button role="tab" aria-selected="false" data-tab="method">How it works</button>
+  </div>
+
+  <div class="modal-body">
+    <section data-panel="about">
+      <p class="lede">TreeGen builds real 3D tree models from botanical parameters. Every
+      vertex, every bark texture and every leaf is computed in the browser — there is not a
+      single image or model file behind any of it.</p>
+
+      <h3>Created by</h3>
+      <p class="credit">Yigit Salih Emecen</p>
+      <p class="muted">Design, engineering and the parameter sets for the hand-tuned species.</p>
+
+      <h3>What you can do with it</h3>
+      <ul>
+        <li>Sixteen species presets, from a quaking aspen to a saguaro cactus, each a full
+            parameter set you can then take apart.</li>
+        <li>Around sixty live controls — trunk taper and flare, per-level branching, crown
+            envelope, foliage, bark and epiphytes — all regenerating as you drag.</li>
+        <li>Four seasons, thirty-one leaf shapes with five venation patterns, twelve bark
+            styles, two themes.</li>
+        <li><b>Experimental forms</b>, off by default: turn it up and trunks start running
+            horizontally for a stretch before elbowing back toward the light, throwing sharp
+            kinks, diving, or corkscrewing — the fallen-and-resprouted shapes.</li>
+        <li>A moss, lichen and bracket-fungus system that grows real 3D forms onto the
+            bark — five moss forms, four fungus forms, placed by where they would actually
+            take hold.</li>
+        <li><b>Randomise</b> rolls an entirely new tree: growth habit, structure, foliage,
+            bark and epiphytes.</li>
+        <li>Export to <b>GLB</b> (geometry plus the generated textures), <b>OBJ</b>,
+            <b>STL</b> for printing, a <b>PNG</b> of the viewport, or the parameter set
+            as <b>JSON</b>.</li>
+      </ul>
+
+      <h3>Sharing</h3>
+      <p>The address bar always holds the tree you are looking at — species, seed, season and
+      theme. Copy the URL and it opens exactly the same tree.</p>
+
+      <p class="muted small">Built with <a href="https://threejs.org" target="_blank" rel="noopener">three.js</a>.
+      No build step, no bundler, no assets.</p>
+    </section>
+
+    <section data-panel="method" hidden>
+      <p class="lede">Two independent generators feed one mesh stage. Both come from published
+      computer-graphics research; the implementations here follow the papers' own equations.</p>
+
+      <h3>1 · Parametric model</h3>
+      <p>A tree is a recursion of <i>stems</i>. The trunk is a chain of segments, each rotated
+      away from the last by a curvature angle; stems split into clones along their length, and
+      spawn child branches whose length follows a crown-shape function. Radii come from a
+      length ratio raised to a falloff power, tapered by one of four continuously blended
+      modes. A flare equation swells the root buttress, a sinusoidal term gives non-circular
+      cross sections, and an optional envelope prunes the crown to a chosen silhouette.</p>
+      <blockquote>
+        Jason Weber and Joseph Penn, <b>“Creation and Rendering of Realistic Trees”</b>,
+        <i>SIGGRAPH ’95</i>, pp. 119–128.
+        <a href="https://dl.acm.org/doi/10.1145/218380.218427" target="_blank" rel="noopener">ACM DL</a> ·
+        <a href="https://courses.cs.duke.edu/cps124/fall01/resources/p119-weber.pdf" target="_blank" rel="noopener">PDF</a>
+      </blockquote>
+      <p class="muted">Four of the presets — Quaking Aspen, Black Tupelo, Weeping Willow and
+      California Black Oak — are the parameter sets published in that paper's appendix.</p>
+
+      <h3>2 · Space colonization</h3>
+      <p>The crown volume is seeded with attraction points. Every growth node within an
+      influence radius of a point is pulled toward the normalised sum of its attractors and
+      grows one step in that direction; points that come within a kill distance are consumed.
+      The competition between buds for space is what produces asymmetric, naturally uneven
+      canopies that pure recursion cannot. Branch thickness follows the pipe model.</p>
+      <blockquote>
+        Adam Runions, Brendan Lane and Przemyslaw Prusinkiewicz,
+        <b>“Modeling Trees with a Space Colonization Algorithm”</b>,
+        <i>Eurographics Workshop on Natural Phenomena</i>, 2007.
+        <a href="https://algorithmicbotany.org/papers/colonization.egwnp2007.large.pdf" target="_blank" rel="noopener">PDF</a>
+      </blockquote>
+
+      <h3>3 · Turning a skeleton into a mesh</h3>
+      <p>Branch centrelines are smoothed with a Catmull–Rom spline and swept as generalized
+      cylinders using parallel-transport frames, so the cross section never twists along the
+      branch. Every stem is closed at both ends and its base is buried inside its parent with
+      a swelling collar, the way a real branch collar welds a limb to a trunk. Leaves are
+      genuine polygons — one parametric width function covers ovate through pinnate outlines
+      and a polar lobe function covers palmate ones — cupped and drooped in three dimensions,
+      then merged into a single buffer so a thirty-thousand-leaf canopy is one draw call.</p>
+
+      <h3>4 · Moss, lichen and fungi</h3>
+      <p>Epiphytes are placed by score, not scattered. Every candidate site on the bark is
+      rated — moss for the shaded side of the trunk, the lower stretch of it, the upper
+      surfaces of near-horizontal limbs and thick wood over twigs; bracket fungi for vertical
+      wood, sideways-facing surfaces and the lower trunk — with a 3D value-noise term so the
+      growth clumps into patches instead of freckling the whole tree. The best-scoring sites
+      are then used first, so turning the coverage down thins the growth back toward the spots
+      where it would really be. Flat forms are bent around the branch before they are placed,
+      because a rigid disc on a curved limb reads as a blade sticking out of the bark.
+      Spreading mats, carpets, velvet fuzz, low cushions, foliose lichen, hanging strands,
+      shelf conks, turkey-tail fans, cap clusters and cup fungi are all built as 3D meshes and
+      merged into one buffer each.</p>
+
+      <h3>5 · Textures</h3>
+      <p>Bark is tileable anisotropic value-noise fBm, drawn to a canvas and turned into
+      colour, a Sobel-derived normal map and a roughness map. Leaf venation is drawn. The sky
+      is a gradient run through a prefiltered environment map so the physically-based
+      materials have something to reflect.</p>
+
+      <h3>Further reading</h3>
+      <ul class="refs">
+        <li>Aristid Lindenmayer, “Mathematical models for cellular interaction in
+            development”, <i>Journal of Theoretical Biology</i>, 1968 — the original L-system.</li>
+        <li>Przemyslaw Prusinkiewicz and Aristid Lindenmayer,
+            <i>The Algorithmic Beauty of Plants</i>, Springer, 1990.
+            <a href="http://algorithmicbotany.org/papers/#abop" target="_blank" rel="noopener">Free online</a></li>
+        <li>Masaki Aono and Tosiyasu Kunii, “Botanical Tree Image Generation”,
+            <i>IEEE CG&amp;A</i>, 1984 — branching and divergence angles, the Schimper–Braun law
+            behind the 137.5° phyllotactic spiral used here.</li>
+        <li>Philippe de Reffye et al., “Plant models faithful to botanical structure and
+            development”, <i>SIGGRAPH ’88</i>.</li>
+        <li>Leonardo da Vinci's rule and Murray's law — the pipe-model exponent that sets how
+            branch radius divides at a fork.</li>
+      </ul>
+    </section>
+  </div>
+</dialog>
+
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

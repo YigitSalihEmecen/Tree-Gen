@@ -1,0 +1,20 @@
+{
+  "name": "treegen",
+  "version": "1.0.0",
+  "description": "Procedural 3D tree generation in the browser — Weber & Penn parametric model plus space colonization. Exports GLB, OBJ and STL.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Yigit Salih Emecen",
+  "homepage": "https://github.com/YigitSalihEmecen/Tree-Gen",
+  "repository": { "type": "git", "url": "git+https://github.com/YigitSalihEmecen/Tree-Gen.git" },
+  "bugs": { "url": "https://github.com/YigitSalihEmecen/Tree-Gen/issues" },
+  "keywords": [
+    "procedural-generation", "trees", "threejs", "webgl", "3d", "l-system",
+    "space-colonization", "weber-penn", "glb", "stl", "generative"
+  ],
+  "scripts": {
+    "start": "python3 -m http.server 8787",
+    "test": "node test/engine.test.mjs && node test/geometry.test.mjs"
+  },
+  "devDependencies": { "three": "0.186.0" }
+}
