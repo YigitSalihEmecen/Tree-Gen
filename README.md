@@ -48,6 +48,14 @@ from a CDN through an import map. Any static server will do.
 **Exports:** GLB (geometry plus the generated textures — opens in Blender, Unity, Unreal),
 OBJ, STL for printing, PNG of the viewport, JSON of the parameter set.
 
+**Levels of detail:** the LOD bar under the toolbar previews five levels cut from the same
+generated tree. LOD1–3 drop sides and rings on the wood, simplify branch polylines
+(Ramer–Douglas–Peucker), cull the thinnest twigs and thin the leaves, scaling the survivors up
+to keep the canopy's area. LOD3 leaves are two-triangle diamonds. LOD4 is a three-plane
+crossed billboard baked from LOD0 by the live renderer. Across all species LOD1–3 average about
+46%, 24% and 4% of LOD0's triangles; LOD4 is 6. Download one LOD, or all five in one GLB/OBJ
+with `_LOD0…4` node names that Unity and Unreal turn into an LOD group.
+
 ## How it works
 
 **Structure.** The parametric model treats a tree as a recursion of *stems*. Each stem is a
@@ -86,6 +94,7 @@ src/species.js    16 parameter sets, palettes, the random-tree roller
 src/geometry.js   skeleton → BufferGeometry
 src/materials.js  canvas-drawn bark, leaf and sky textures
 src/growth.js     moss, lichen and fungus forms + scored placement
+src/lod.js        five levels of detail + billboard impostor geometry
 src/app.js        viewport, controls, exporters
 test/             node test suites
 ```
@@ -94,7 +103,7 @@ test/             node test suites
 
 ```bash
 npm install        # only needed for the tests
-npm test           # 24 checks
+npm test           # 27 checks
 ```
 
 They cover determinism, finite geometry, the envelope maths, outward winding, watertightness,

@@ -6,7 +6,9 @@
 import assert from 'node:assert/strict';
 import { generateTree, rng } from '../src/tree.js';
 import { SPECIES, SPECIES_KEYS, randomSpecies } from '../src/species.js';
-import { buildBranchGeometry, buildLeafGeometry, leafOutline, LEAF_SHAPES, leafVeins } from '../src/geometry.js';
+import { buildBranchGeometry, buildLeafGeometry, leafOutline, LEAF_SHAPES, leafVeins,
+  simplifyPolyline } from '../src/geometry.js';
+import { lodGeometry, buildImpostorGeometry } from '../src/lod.js';
 import { buildGrowth, MOSS_TYPES, FUNGUS_TYPES } from '../src/growth.js';
 
 let pass = 0;
@@ -265,6 +267,51 @@ test('detail level scales the vertex count', () => {
   const lo = buildBranchGeometry(tree, { detail: 0.4 }).getAttribute('position').count;
   const hi = buildBranchGeometry(tree, { detail: 1.4 }).getAttribute('position').count;
   assert.ok(hi > lo * 1.5, `detail did not scale: ${lo} -> ${hi}`);
+});
+
+test('every mesh LOD is valid and cheaper than the one before it', () => {
+  const tris = (g) => (g ? g.index.count / 3 : 0);
+  const rows = [];
+  for (const k of SPECIES_KEYS) {
+    const sp = SPECIES[k];
+    for (const mode of ['parametric', 'colonize']) {
+      const tree = generateTree({ ...sp.params, mode, seed: 9, density: 0.6 });
+      const growth = { enabled: true, detail: 1, moss: { on: true, type: 'mixed', amount: 0.6,
+        reach: 0.55, side: 20, scale: 1, colors: ['#87ac57', '#46662a'] },
+        fungus: { on: true, type: 'bracket', amount: 0.4, scale: 1, colors: ['#c9b083', '#5d4326'] } };
+      const leaves = { shape: sp.params.leafShape, colors: sp.palette.leaf.summer };
+      const counts = [0, 1, 2, 3].map((lvl) => {
+        const g = lodGeometry(tree, lvl, { detail: 1, leaves, growth });
+        checkGeo(g.bark, `${k}/${mode} LOD${lvl} bark`);
+        if (g.leaves) checkGeo(g.leaves, `${k}/${mode} LOD${lvl} foliage`);
+        if (g.moss) checkGeo2(g.moss, `${k}/${mode} LOD${lvl} moss`);
+        return tris(g.bark) + tris(g.leaves) + tris(g.moss) + tris(g.fungus);
+      });
+      for (let i = 1; i < 4; i++) {
+        assert.ok(counts[i] < counts[i - 1],
+          `${k}/${mode}: LOD${i} (${counts[i]}) not cheaper than LOD${i - 1} (${counts[i - 1]})`);
+      }
+      assert.ok(counts[3] < counts[0] * 0.25, `${k}/${mode}: LOD3 keeps ${counts[3]} of ${counts[0]}`);
+      rows.push(counts.map((c) => c / counts[0]));
+    }
+  }
+  const mean = [0, 1, 2, 3].map((i) => rows.reduce((s, r) => s + r[i], 0) / rows.length);
+  console.log(`      mean share of LOD0 triangles: ${mean.map((m) => `${(m * 100).toFixed(1)}%`).join(' / ')}`);
+});
+
+test('polyline simplification keeps endpoints and drops collinear points', () => {
+  const line = Array.from({ length: 20 }, (_, i) => ({ x: Math.max(0, i - 10), y: Math.min(i, 10), z: 0, r: 0.1 }));
+  const s = simplifyPolyline(line, 0.1);
+  assert.deepEqual(s.map((p) => p.x + p.y), [0, 10, 19]);
+});
+
+test('impostor is three crossed quads spanning the atlas', () => {
+  const g = buildImpostorGeometry({ cx: 0, cz: 0, r: 2, top: 5 });
+  assert.equal(g.index.count / 3, 6);
+  checkGeo(g, 'impostor');
+  const uv = g.getAttribute('uv').array;
+  assert.equal(Math.min(...uv), 0);
+  assert.equal(Math.max(...uv), 1);
 });
 
 console.log(`\n${pass} checks passed`);

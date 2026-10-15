@@ -10,9 +10,10 @@ import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 
 import { generateTree, mergeParams, SHAPES } from './tree.js';
 import { SPECIES, SPECIES_KEYS, randomSpecies } from './species.js';
-import { buildBranchGeometry, buildLeafGeometry, LEAF_SHAPES, leafVeins } from './geometry.js';
+import { LEAF_SHAPES, leafVeins } from './geometry.js';
+import { LODS, IMPOSTOR_VIEWS, lodGeometry, extent, buildImpostorGeometry } from './lod.js';
 import { makeBarkTexture, makeLeafTexture, makeEnvironment, BARK_STYLES } from './materials.js';
-import { buildGrowth, GROWTH_DEFAULTS, MOSS_TYPES, FUNGUS_TYPES } from './growth.js';
+import { GROWTH_DEFAULTS, MOSS_TYPES, FUNGUS_TYPES } from './growth.js';
 
 /* ------------------------------------------------------------- state ---- */
 
@@ -21,6 +22,7 @@ const state = {
   season: 'summer',
   level: 1,                 // which branch level the level-bound sliders edit
   detail: 1,
+  lod: 0,
   theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
   params: null,
   bark: null,
@@ -168,13 +170,125 @@ function windify(mat, leafy) {
 
 let current = null;
 let growStart = -1;   // wall clock, so a throttled tab still finishes growing
+let built = null;     // { tree, p, showLeaves } of the tree on screen, for building other LODs
+
+function disposeGroup(group) {
+  group.traverse((o) => {
+    if (!o.isMesh) return;
+    o.geometry.dispose();
+    if (o.material.userData.baked) o.material.map.dispose();
+    o.material.dispose();
+  });
+}
 
 function disposeTree() {
-  treeGroup.traverse((o) => {
-    if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); }
-  });
+  disposeGroup(treeGroup);
   treeGroup.clear();
 }
+
+function meshLod(level) {
+  const { tree, p, showLeaves } = built;
+  const g = lodGeometry(tree, level, {
+    detail: state.detail,
+    leaves: showLeaves ? { shape: p.leafShape, colors: state.leafColors } : null,
+    growth: state.growth,
+  });
+  const group = new THREE.Group();
+  const add = (geo, mat, name, leafy) => {
+    if (!geo) return;
+    Object.assign(mat, { wireframe: state.wireframe, clippingPlanes: treeClips, clipShadows: true });
+    windify(mat, leafy);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.name = name;
+    mesh.castShadow = mesh.receiveShadow = true;
+    group.add(mesh);
+  };
+  add(g.bark, new THREE.MeshStandardMaterial({ ...barkTex, roughness: 1, metalness: 0 }), 'Bark', false);
+  add(g.leaves, new THREE.MeshStandardMaterial({
+    map: leafTexture(p.leafShape), vertexColors: true, side: THREE.DoubleSide,
+    roughness: 0.68, metalness: 0,
+  }), 'Foliage', true);
+  add(g.moss, epiphyte(0.97), 'Moss', false);
+  add(g.fungus, epiphyte(0.72), 'Fungus', false);
+  group.userData.counts = g.counts;
+  return group;
+}
+
+/**
+ * Photograph `src` from each impostor view into one atlas. Rendered through the
+ * live renderer and scene, so the billboard carries the viewport's own lighting,
+ * environment, shadows and tone mapping; the material then skips tone mapping
+ * so it is not applied twice.
+ */
+function bakeAtlas(src, { cx, cz, r, top }) {
+  const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
+  let th = Math.min(1024, buf.y);
+  let tw = Math.round((th * 2 * r) / top);
+  if (tw > Math.min(1024, buf.x)) {
+    tw = Math.min(1024, buf.x);
+    th = Math.round((tw * top) / (2 * r));
+  }
+  tw = Math.max(1, tw); th = Math.max(1, th);
+
+  const atlas = document.createElement('canvas');
+  atlas.width = tw * IMPOSTOR_VIEWS.length;
+  atlas.height = th;
+  const g2 = atlas.getContext('2d');
+
+  const pr = renderer.getPixelRatio();
+  const viewport = renderer.getViewport(new THREE.Vector4());
+  const keep = [clipPlane.constant, windU.amp.value];
+  clipPlane.constant = 1e6;
+  windU.amp.value = 0;
+  ground.visible = treeGroup.visible = false;
+  scene.add(src);
+
+  const d = r * 2 + 0.5;
+  const cam = new THREE.OrthographicCamera(-r, r, top, 0, 0.01, d + r + 1);
+  IMPOSTOR_VIEWS.forEach((a, i) => {
+    cam.position.set(cx + Math.sin(a) * d, 0, cz + Math.cos(a) * d);
+    cam.lookAt(cx, 0, cz);
+    renderer.setViewport(0, 0, tw / pr, th / pr);
+    renderer.render(scene, cam);
+    // GL's viewport origin is bottom-left; the canvas's is top-left
+    g2.drawImage(canvas, 0, canvas.height - th, tw, th, i * tw, 0, tw, th);
+  });
+
+  scene.remove(src);
+  ground.visible = treeGroup.visible = true;
+  [clipPlane.constant, windU.amp.value] = keep;
+  renderer.setViewport(viewport);
+
+  const tex = new THREE.CanvasTexture(atlas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+function impostorLod() {
+  const src = meshLod(0);
+  const [cx, , cz] = built.tree.bounds.center;
+  const box = { cx, cz, ...extent(src.children.map((m) => m.geometry), cx, cz) };
+  const map = bakeAtlas(src, box);
+  disposeGroup(src);
+  // ponytail: plain mipmaps let alpha coverage shrink with distance; add
+  // coverage-preserving mips if far billboards look thin
+  const mat = new THREE.MeshBasicMaterial({
+    map, alphaTest: 0.4, side: THREE.DoubleSide, toneMapped: false,
+    wireframe: state.wireframe, clippingPlanes: treeClips, clipShadows: true,
+  });
+  mat.userData.baked = true;
+  windify(mat, false);
+  const mesh = new THREE.Mesh(buildImpostorGeometry(box), mat);
+  mesh.name = 'Billboard';
+  mesh.castShadow = true;
+  const group = new THREE.Group();
+  group.add(mesh);
+  group.userData.counts = { moss: 0, fungus: 0 };
+  return group;
+}
+
+const lodObject = (level) => (LODS[level].impostor ? impostorLod() : meshLod(level));
 
 function build({ refit = false, grow = false } = {}) {
   const t0 = performance.now();
@@ -182,68 +296,13 @@ function build({ refit = false, grow = false } = {}) {
   const showLeaves = state.showLeaves && state.showLeavesSeason && p.leaves !== 0;
   const tree = generateTree(p);
   current = tree;
+  built = { tree, p, showLeaves };
 
   disposeTree();
   if (barkTex) for (const k of Object.keys(barkTex)) barkTex[k].dispose();
   barkTex = makeBarkTexture(state.bark, 512, p.seed);
 
-  const barkGeo = buildBranchGeometry(tree, { detail: state.detail });
-  const barkMat = new THREE.MeshStandardMaterial({
-    ...barkTex,
-    roughness: 1, metalness: 0,
-    wireframe: state.wireframe,
-    clippingPlanes: treeClips, clipShadows: true,
-  });
-  windify(barkMat, false);
-  const barkMesh = new THREE.Mesh(barkGeo, barkMat);
-  barkMesh.name = 'Bark';
-  barkMesh.castShadow = barkMesh.receiveShadow = true;
-  treeGroup.add(barkMesh);
-
-  let tris = barkGeo.index.count / 3;
-
-  if (showLeaves && tree.leaves.length) {
-    const leafGeo = buildLeafGeometry(tree, {
-      shape: p.leafShape, colors: state.leafColors, curl: 1, detail: state.detail,
-    });
-    const leafMat = new THREE.MeshStandardMaterial({
-      map: leafTexture(p.leafShape),
-      vertexColors: true,
-      side: THREE.DoubleSide,
-      roughness: 0.68, metalness: 0,
-      wireframe: state.wireframe,
-      clippingPlanes: treeClips, clipShadows: true,
-    });
-    windify(leafMat, true);
-    const leafMesh = new THREE.Mesh(leafGeo, leafMat);
-    leafMesh.name = 'Foliage';
-    leafMesh.castShadow = leafMesh.receiveShadow = true;
-    treeGroup.add(leafMesh);
-    tris += leafGeo.index.count / 3;
-  }
-
-  // --- epiphytes ----------------------------------------------------------
-  let mossN = 0, fungusN = 0;
-  if (state.growth.enabled) {
-    const g = buildGrowth(tree, { ...state.growth, detail: state.growth.detail * state.detail });
-    mossN = g.counts.moss;
-    fungusN = g.counts.fungus;
-    for (const [geo, rough, name] of [[g.moss, 0.97, 'Moss'], [g.fungus, 0.72, 'Fungus']]) {
-      if (!geo) continue;
-      const mat = epiphyte(rough);
-      mat.wireframe = state.wireframe;
-      mat.clippingPlanes = treeClips;
-      mat.clipShadows = true;
-      windify(mat, false);
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.name = name;
-      mesh.castShadow = mesh.receiveShadow = true;
-      treeGroup.add(mesh);
-      tris += geo.index.count / 3;
-    }
-  }
-
-  // ground + shadow camera sized to the tree
+  // ground + shadow camera sized to the tree (before any billboard bake uses them)
   const r = Math.max(1.2, tree.radius * 1.9);
   ground.scale.setScalar(r * 1.8);
   const s = Math.max(tree.height, tree.radius) * 1.3;
@@ -252,6 +311,12 @@ function build({ refit = false, grow = false } = {}) {
   sun.shadow.camera.updateProjectionMatrix();
   windU.h.value = Math.max(1, tree.height);
 
+  const obj = lodObject(state.lod);
+  treeGroup.add(obj);
+  let tris = 0;
+  obj.traverse((o) => { if (o.isMesh) tris += o.geometry.index.count / 3; });
+  const { moss: mossN, fungus: fungusN } = obj.userData.counts;
+
   if (refit) frame(tree);
   if (grow) { growStart = performance.now(); clipPlane.constant = 0.001; }
 
@@ -259,7 +324,8 @@ function build({ refit = false, grow = false } = {}) {
   const epi = mossN || fungusN
     ? ` · ${fmt(mossN)} moss · ${fmt(fungusN)} fungi` : '';
   document.getElementById('stats').textContent =
-    `${fmt(tris)} tris · ${fmt(tree.stats.branches)} branches · ${fmt(tree.stats.leaves)} leaves${epi}\n` +
+    `LOD${state.lod} ${LODS[state.lod].label.toLowerCase()} · ${fmt(tris)} tris · ` +
+    `${fmt(tree.stats.branches)} branches · ${fmt(tree.stats.leaves)} leaves${epi}\n` +
     `${tree.height.toFixed(1)} m tall · ${(tree.radius * 2).toFixed(1)} m wide · ${ms.toFixed(0)} ms`;
   document.getElementById('hud-species').textContent = SPECIES[state.species].name;
   document.getElementById('hud-seed').textContent = `seed ${p.seed}`;
@@ -267,6 +333,7 @@ function build({ refit = false, grow = false } = {}) {
   history.replaceState(null, '', `?species=${state.species}&seed=${p.seed}` +
     `&season=${state.season}&theme=${state.theme}` +
     (state.detail !== 1 ? `&detail=${state.detail}` : '') +
+    (state.lod ? `&lod=${state.lod}` : '') +
     (state.growth.enabled ? '&growth=1' : '') +
     (p.mode === 'colonize' ? '&mode=colonize' : ''));
 }
@@ -646,6 +713,19 @@ toggle('t-spin', (v) => { state.spin = v; controls.autoRotate = v; });
 toggle('t-wind', (v) => { state.wind = v; });
 toggle('t-wire', (v) => { state.wireframe = v; build(); });
 toggle('t-leaves', (v) => { state.showLeaves = v; build(); });
+const lodBar = document.getElementById('lod');
+function renderLodBar() {
+  lodBar.innerHTML = '';
+  LODS.forEach((L, i) => {
+    const b = document.createElement('button');
+    b.textContent = `LOD${i}`;
+    b.title = L.label;
+    b.setAttribute('aria-pressed', String(i === state.lod));
+    b.onclick = () => { state.lod = i; renderLodBar(); queue(); };
+    lodBar.appendChild(b);
+  });
+}
+
 document.getElementById('t-theme').onclick = () => {
   state.theme = state.theme === 'dark' ? 'light' : 'dark';
   applyTheme();
@@ -690,15 +770,27 @@ document.getElementById('download').onclick = (e) => {
   menu.hidden = !menu.hidden;
 };
 addEventListener('click', () => { menu.hidden = true; });
+let exportAll = false;
 menu.onclick = (e) => {
+  e.stopPropagation();
+  const scope = e.target.closest('button[data-scope]');
+  if (scope) {
+    exportAll = scope.dataset.scope === 'all';
+    for (const b of menu.querySelectorAll('button[data-scope]')) {
+      b.setAttribute('aria-pressed', String(b === scope));
+    }
+    // STL has no objects, so five LODs would fuse into one solid
+    menu.querySelector('button[data-fmt="stl"]').disabled = exportAll;
+    return;
+  }
   const btn = e.target.closest('button[data-fmt]');
-  if (!btn) return;
+  if (!btn || btn.disabled) return;
   menu.hidden = true;
   doExport(btn.dataset.fmt);
 };
 
-function exportName(ext) {
-  return `${state.species}-${state.params.seed}.${ext}`;
+function exportName(ext, lod) {
+  return `${state.species}-${state.params.seed}${lod === undefined ? '' : `-${lod}`}.${ext}`;
 }
 
 function doExport(fmt) {
@@ -719,17 +811,37 @@ function doExport(fmt) {
   // clip plane must be neutral or the exporters bake a half-grown tree
   const keep = clipPlane.constant;
   clipPlane.constant = 1e6;
+  // `_LODn` suffixes are what Unity and Unreal look for to build an LOD group
   const group = new THREE.Group();
   group.name = name;
-  treeGroup.children.forEach((m) => group.add(new THREE.Mesh(m.geometry, m.material)));
+  const extra = [];
+  const levels = exportAll ? LODS.map((_, i) => i) : [state.lod];
+  for (const i of levels) {
+    let src = treeGroup.children[0];
+    if (i !== state.lod) extra.push(src = lodObject(i));
+    const lod = new THREE.Group();
+    lod.name = `${name}_LOD${i}`;
+    src.traverse((o) => {
+      if (!o.isMesh) return;
+      const m = new THREE.Mesh(o.geometry, o.material);
+      m.name = `${o.name}_LOD${i}`;
+      lod.add(m);
+    });
+    group.add(lod);
+  }
+  const done = () => extra.forEach(disposeGroup);
+  const tag = exportAll ? 'lods' : `lod${state.lod}`;
 
   if (fmt === 'obj') {
-    save(new OBJExporter().parse(group), exportName('obj'), 'text/plain');
+    save(new OBJExporter().parse(group), exportName('obj', tag), 'text/plain');
+    done();
   } else if (fmt === 'stl') {
-    save(new STLExporter().parse(group, { binary: true }), exportName('stl'), 'model/stl');
+    save(new STLExporter().parse(group, { binary: true }), exportName('stl', tag), 'model/stl');
+    done();
   } else {
-    new GLTFExporter().parse(group, (glb) => save(glb, exportName('glb'), 'model/gltf-binary'),
-      (err) => { console.error(err); alert('GLB export failed — see console.'); },
+    new GLTFExporter().parse(group,
+      (glb) => { save(glb, exportName('glb', tag), 'model/gltf-binary'); done(); },
+      (err) => { done(); console.error(err); alert('GLB export failed — see console.'); },
       { binary: true });
   }
   clipPlane.constant = keep;
@@ -779,6 +891,8 @@ state.params.seed = Math.max(1, +q.get('seed') || 1 + Math.floor(Math.random() *
 if (q.get('mode') === 'colonize') state.params.mode = 'colonize';
 if (q.get('detail')) state.detail = Math.min(1.8, Math.max(0.25, +q.get('detail') || 1));
 if (q.get('growth')) state.growth.enabled = q.get('growth') !== '0';
+state.lod = Math.min(LODS.length - 1, Math.max(0, +q.get('lod') | 0));
+renderLodBar();
 applySeason();
 applyTheme();
 renderControls();

@@ -51,9 +51,35 @@ const hash1 = (n) => {
   return s - Math.floor(s);
 };
 
+/** Ramer–Douglas–Peucker on a branch polyline; endpoints always survive. */
+export function simplifyPolyline(pts, tol) {
+  if (pts.length < 3 || !(tol > 0)) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    const A = pts[a], B = pts[b];
+    const ex = B.x - A.x, ey = B.y - A.y, ez = B.z - A.z;
+    const len2 = ex * ex + ey * ey + ez * ez || 1e-12;
+    let far = -1, worst = tol * tol;
+    for (let i = a + 1; i < b; i++) {
+      const P = pts[i];
+      const t = Math.max(0, Math.min(1, ((P.x - A.x) * ex + (P.y - A.y) * ey + (P.z - A.z) * ez) / len2));
+      const dx = A.x + ex * t - P.x, dy = A.y + ey * t - P.y, dz = A.z + ez * t - P.z;
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d > worst) { worst = d; far = i; }
+    }
+    if (far >= 0) { keep[far] = 1; stack.push([a, far], [far, b]); }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+
 /**
  * @param {object} tree  output of generateTree()
- * @param {object} o     { detail, radialMin, radialMax, subdiv, barkNoise, tiling }
+ * @param {object} o     { detail, subdiv, radialScale, barkNoise, tiling, vertexBudget,
+ *                         minRadius (cull limbs thinner than this fraction of the trunk),
+ *                         simplify (polyline tolerance, in multiples of each branch's radius) }
  */
 export function buildBranchGeometry(tree, o = {}) {
   const detail = o.detail ?? 1;
@@ -74,18 +100,21 @@ export function buildBranchGeometry(tree, o = {}) {
   // tessellation down rather than letting one tree swamp the renderer.
   const plan = new Array(tree.branches.length);
   let estimate = 0;
+  const minRel = o.minRadius ?? 0;
   for (let bi = 0; bi < tree.branches.length; bi++) {
     const b = tree.branches[bi];
     const rel = Math.min(1, b.radius / (trunkRadius || 1));
-    const sub = b.pts.length >= 24 ? 1
+    if (b.level > 0 && rel < minRel) { plan[bi] = null; continue; }
+    const pts = o.simplify ? simplifyPolyline(b.pts, b.radius * o.simplify) : b.pts;
+    const sub = pts.length >= 24 ? 1
       : b.level === 0 ? subdiv + 1
-      : b.pts.length >= 9 ? 1
+      : pts.length >= 9 ? 1
       : rel > 0.08 ? subdiv : 1;
     let seg = Math.max(3, Math.min(24, Math.round(
       (3 + 14 * Math.pow(rel, 0.45)) * (o.radialScale ?? 1) * detail)));
     if (p.lobes && p.lobeDepth > 0.005 && b.level === 0) seg = Math.max(seg, p.lobes * 4);
-    const rings = (b.pts.length - 1) * sub + 1 + (b.attachRadius > 0 ? 1 : 0);
-    plan[bi] = { sub, seg, rel };
+    const rings = (pts.length - 1) * sub + 1 + (b.attachRadius > 0 ? 1 : 0);
+    plan[bi] = { sub, seg, rel, pts };
     estimate += rings * (seg + 1);
   }
   const budget = o.vertexBudget ?? 260000;
@@ -93,12 +122,13 @@ export function buildBranchGeometry(tree, o = {}) {
 
   for (let bi = 0; bi < tree.branches.length; bi++) {
     const b = tree.branches[bi];
+    if (!plan[bi]) continue;
     // Level of detail is driven by how thick the branch actually is, not by its
     // level: a fat level-2 limb deserves more sides than a hair-thin level-1 whip.
     // Spline smoothing only pays off on a branch thick enough to show a
     // silhouette, and only if it is not already finely segmented.
     const sub = Math.max(1, Math.round(plan[bi].sub * shrink));
-    const line = resample(b.pts, sub);
+    const line = resample(plan[bi].pts, sub);
     if (line.length < 2) continue;
 
     // Bury the base of a stem inside the wood it grows from. Without this the
@@ -377,17 +407,33 @@ function hexToRgb(h) {
   return c.convertSRGBToLinear();
 }
 
+/** Four extreme points of an outline: the cheapest shape that still reads as a leaf. */
+function diamond(pts) {
+  const most = (f) => pts.reduce((a, b) => (f(b) > f(a) ? b : a));
+  return [most((v) => -v.y), most((v) => v.x), most((v) => v.y), most((v) => -v.x)];
+}
+
 /**
  * @param {object} tree
- * @param {object} o { shape, colors: [hexA, hexB], curl, jitter }
+ * @param {object} o { shape, colors: [hexA, hexB], curl, detail,
+ *                     keep (fraction of leaves kept; survivors grow to hold canopy area),
+ *                     cards (two-triangle diamond instead of the full outline) }
  */
 export function buildLeafGeometry(tree, o = {}) {
   // scale outline resolution to the canopy size so a dense tree stays drawable
   const n = tree.leaves.length;
   const auto = n > 20000 ? 0.3 : n > 8000 ? 0.5 : n > 2000 ? 0.75 : 1;
-  const { pts, cup, droop } = leafOutline(o.shape || tree.params.leafShape || 'oval',
-    (o.detail ?? 1) * auto);
+  const outline = leafOutline(o.shape || tree.params.leafShape || 'oval', (o.detail ?? 1) * auto);
+  const { cup, droop } = outline;
+  const pts = o.cards ? diamond(outline.pts) : outline.pts;
   const tris = THREE.ShapeUtils.triangulateShape(pts, []);
+
+  // Thinning keys off each leaf's own index, so a leaf keeps its colour and the
+  // survivors of a coarser level are always a subset of the finer one's.
+  const keep = Math.min(1, Math.max(0.01, o.keep ?? 1));
+  const grow = 1 / Math.sqrt(keep);
+  const kept = [];
+  for (let li = 0; li < n; li++) if (keep >= 1 || hash1(li * 0.6180339 + 0.37) < keep) kept.push(li);
   const curl = (o.curl ?? 1) * cup;
 
   // one flat template, instanced by hand into a single merged buffer
@@ -404,7 +450,7 @@ export function buildLeafGeometry(tree, o = {}) {
 
   const invR = 1 / Math.max(0.25, tree.radius);
   const invH = 1 / Math.max(0.25, tree.height);
-  const count = tree.leaves.length;
+  const count = kept.length;
   const vpl = tpl.length;
   const pos = new Float32Array(count * vpl * 3);
   const uvs = new Float32Array(count * vpl * 2);
@@ -415,11 +461,11 @@ export function buildLeafGeometry(tree, o = {}) {
   const v = new THREE.Vector3();
   let vo = 0, io = 0;
 
-  for (let li = 0; li < count; li++) {
+  for (const li of kept) {
     const L = tree.leaves[li];
     q.set(L.q[0], L.q[1], L.q[2], L.q[3]);
-    const sy = L.scale;
-    const sx = L.scale * (L.width ?? 1);
+    const sy = L.scale * grow;
+    const sx = sy * (L.width ?? 1);
     const mix = hash1(li * 3.71);
     // cheap stand-in for self-shadowing: exposure rises toward the crown's
     // outside and top, which is where the light actually reaches

@@ -352,6 +352,10 @@ input[type=color] {
   transition: background .15s;
 }
 .menu button:hover { background: var(--line-soft); }
+.menu button:disabled { opacity: .4; cursor: not-allowed; background: none; }
+.menu .seg { margin-bottom: 4px; }
+.menu .seg button { padding: 6px 4px; text-align: center; font-size: 12px; }
+.menu .seg button[aria-pressed="true"] { background: var(--surface); }
 .menu b { display: block; font-size: 12.5px; font-weight: 600; }
 .menu span { display: block; font-size: 11px; color: var(--ink-3); margin-top: 1px; }
 
@@ -393,6 +397,15 @@ input[type=color] {
   backdrop-filter: blur(10px);
   z-index: 20;
 }
+
+.lod-bar {
+  position: absolute; top: 64px; right: 16px; z-index: 20;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+}
+.lod-bar button { flex: none; padding: 5px 8px; font-size: 11px; }
 
 .floating {
   position: absolute; top: 14px; left: 14px; z-index: 20;
@@ -454,6 +467,7 @@ input[type=color] {
   .section-inner, .section-head { padding-left: 16px; padding-right: 16px; }
   .panel-foot { padding: 10px 16px calc(12px + env(safe-area-inset-bottom)); }
   .toolbar { top: 12px; right: 12px; }
+  .lod-bar { top: 62px; right: 12px; }
   .hud-title { top: 14px; left: 14px; }
   .stats { bottom: 12px; left: 14px; }
   .working { bottom: 12px; right: 14px; }
