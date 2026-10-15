@@ -4,11 +4,12 @@
  * buffers for every species and every leaf shape.
  */
 import assert from 'node:assert/strict';
+import * as THREE from 'three';
 import { generateTree, rng } from '../src/tree.js';
 import { SPECIES, SPECIES_KEYS, randomSpecies } from '../src/species.js';
-import { buildBranchGeometry, buildLeafGeometry, leafOutline, LEAF_SHAPES, leafVeins,
-  simplifyPolyline } from '../src/geometry.js';
-import { lodGeometry, buildImpostorGeometry } from '../src/lod.js';
+import { buildBranchGeometry, buildLeafGeometry, leafOutline, LEAF_SHAPES, leafVeins } from '../src/geometry.js';
+import { lodGeometry, buildImpostorGeometry, simplifyGeometry, optimizeForGpu, leafCards,
+  paintCards } from '../src/lod.js';
 import { buildGrowth, MOSS_TYPES, FUNGUS_TYPES } from '../src/growth.js';
 
 let pass = 0;
@@ -299,10 +300,45 @@ test('every mesh LOD is valid and cheaper than the one before it', () => {
   console.log(`      mean share of LOD0 triangles: ${mean.map((m) => `${(m * 100).toFixed(1)}%`).join(' / ')}`);
 });
 
-test('polyline simplification keeps endpoints and drops collinear points', () => {
-  const line = Array.from({ length: 20 }, (_, i) => ({ x: Math.max(0, i - 10), y: Math.min(i, 10), z: 0, r: 0.1 }));
-  const s = simplifyPolyline(line, 0.1);
-  assert.deepEqual(s.map((p) => p.x + p.y), [0, 10, 19]);
+test('quadric simplification cuts the bark but stays inside its error bound', () => {
+  const tree = generateTree({ ...SPECIES.oak.params, seed: 3, density: 0.5 });
+  const full = buildBranchGeometry(tree, {});
+  const lo = simplifyGeometry(full, 0.008);
+  checkGeo(lo, 'simplified bark');
+  assert.ok(lo.index.count < full.index.count * 0.5,
+    `simplifier barely reduced: ${full.index.count / 3} -> ${lo.index.count / 3}`);
+  const box = (g) => new THREE.Box3().setFromBufferAttribute(g.getAttribute('position'));
+  const a = box(full), b = box(lo);
+  // the simplifier only deletes vertices, so drift is outer twigs collapsing
+  const tol = 0.05 * a.getSize(new THREE.Vector3()).length();
+  assert.ok(a.min.distanceTo(b.min) < tol && a.max.distanceTo(b.max) < tol, 'silhouette drifted');
+});
+
+test('GPU reorder keeps every triangle', () => {
+  const tree = generateTree({ seed: 4, density: 0.4 });
+  const g = buildBranchGeometry(tree, {});
+  const o = optimizeForGpu(g);
+  checkGeo(o, 'reordered bark');
+  assert.equal(o.index.count, g.index.count);
+  assert.equal(o.getAttribute('position').count, g.getAttribute('position').count);
+});
+
+test('leaf cards cover every leaf and paint inside their tiles', () => {
+  const tree = generateTree({ ...SPECIES.maple.params, seed: 6, density: 0.5 });
+  const leaves = buildLeafGeometry(tree, { shape: 'maple' });
+  const n = leaves.userData.leafCount;
+  const layout = leafCards(leaves, 8, { x: 0, y: tree.height / 2, z: 0 });
+  checkGeo(layout.geometry, 'cards');
+  assert.equal(layout.cards.reduce((s, c) => s + c.length, 0), n * 2, 'a leaf went missing');
+  assert.equal(layout.cards.length % 2, 0, 'cards come in crossed pairs');
+  assert.ok(layout.cards.length >= n / 4, 'too few cards');
+  for (const v of layout.geometry.getAttribute('uv').array) assert.ok(v >= 0 && v <= 1);
+  let fills = 0, out = 0;
+  const pt = (x, y) => { if (x < 0 || y < 0 || x > layout.size || y > layout.size) out++; };
+  paintCards({ clearRect() {}, beginPath() {}, closePath() {}, moveTo: pt, lineTo: pt,
+    fill() { fills++; } }, layout);
+  assert.equal(fills, n * 2, 'each leaf paints once per card of its pair');
+  assert.equal(out, 0, 'painted outside the atlas');
 });
 
 test('impostor is three crossed quads spanning the atlas', () => {

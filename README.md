@@ -48,13 +48,30 @@ from a CDN through an import map. Any static server will do.
 **Exports:** GLB (geometry plus the generated textures — opens in Blender, Unity, Unreal),
 OBJ, STL for printing, PNG of the viewport, JSON of the parameter set.
 
-**Levels of detail:** the LOD bar under the toolbar previews five levels cut from the same
-generated tree. LOD1–3 drop sides and rings on the wood, simplify branch polylines
-(Ramer–Douglas–Peucker), cull the thinnest twigs and thin the leaves, scaling the survivors up
-to keep the canopy's area. LOD3 leaves are two-triangle diamonds. LOD4 is a three-plane
-crossed billboard baked from LOD0 by the live renderer. Across all species LOD1–3 average about
-46%, 24% and 4% of LOD0's triangles; LOD4 is 6. Download one LOD, or all five in one GLB/OBJ
-with `_LOD0…4` node names that Unity and Unreal turn into an LOD group.
+**Levels of detail:** the LOD bar under the toolbar previews five levels built from the same
+generated tree; every level meshes it at full resolution and then optimises the mesh.
+
+| Level | Wood, moss, fungus | Foliage |
+|---|---|---|
+| LOD0 | as generated | as generated |
+| LOD1 | quadric simplification, 0.2 % error | leaves thinned 25 %, survivors scaled to keep canopy area |
+| LOD2 | quadric simplification, 0.4 % error | cluster cards: ~6 leaves per crossed pair of textured quads |
+| LOD3 | quadric simplification, 0.8 % error | cluster cards: ~24 leaves per pair |
+| LOD4 | — | three-plane crossed billboard baked from LOD0 |
+
+Simplification is meshoptimizer's attribute-aware edge collapse with a single error bound in metres
+(a fraction of the tree's size), so triangles go only where the surface stays within the bound and
+islands smaller than it (hair twigs, tufts) are pruned. Cards are fitted per leaf cluster (median
+split, then principal axes), and each card's tile in the atlas is the cluster's real leaves painted
+as seen along that card's normal. Every exported buffer is reordered for the vertex cache and
+vertex fetch. Across all species LOD1–3 average about 20 %, 8 % and 3 % of LOD0's triangles;
+LOD4 is 6.
+
+**Auto** previews them as a `THREE.LOD`, switching where each level's error falls to ~1.5 px on
+screen. Download one LOD, or all five in one GLB/OBJ with `_LOD0…4` node names that Unity and
+Unreal turn into an LOD group. **GLB · compressed** adds vertex quantization and meshopt buffer
+compression via glTF-Transform (about half the size; three.js, Babylon, glTFast and Godot read it,
+Blender does not).
 
 ## How it works
 
@@ -94,7 +111,7 @@ src/species.js    16 parameter sets, palettes, the random-tree roller
 src/geometry.js   skeleton → BufferGeometry
 src/materials.js  canvas-drawn bark, leaf and sky textures
 src/growth.js     moss, lichen and fungus forms + scored placement
-src/lod.js        five levels of detail + billboard impostor geometry
+src/lod.js        levels of detail: simplification, leaf cluster cards, impostor
 src/app.js        viewport, controls, exporters
 test/             node test suites
 ```
@@ -103,7 +120,7 @@ test/             node test suites
 
 ```bash
 npm install        # only needed for the tests
-npm test           # 27 checks
+npm test           # 29 checks
 ```
 
 They cover determinism, finite geometry, the envelope maths, outward winding, watertightness,

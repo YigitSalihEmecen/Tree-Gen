@@ -11,7 +11,8 @@ import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { generateTree, mergeParams, SHAPES } from './tree.js';
 import { SPECIES, SPECIES_KEYS, randomSpecies } from './species.js';
 import { LEAF_SHAPES, leafVeins } from './geometry.js';
-import { LODS, IMPOSTOR_VIEWS, lodGeometry, extent, buildImpostorGeometry } from './lod.js';
+import { LODS, IMPOSTOR_VIEWS, lodGeometry, lodDistances, paintCards, extent,
+  buildImpostorGeometry } from './lod.js';
 import { makeBarkTexture, makeLeafTexture, makeEnvironment, BARK_STYLES } from './materials.js';
 import { GROWTH_DEFAULTS, MOSS_TYPES, FUNGUS_TYPES } from './growth.js';
 
@@ -186,10 +187,10 @@ function disposeTree() {
   treeGroup.clear();
 }
 
-function meshLod(level) {
+function meshLod(level, gpu) {
   const { tree, p, showLeaves } = built;
   const g = lodGeometry(tree, level, {
-    detail: state.detail,
+    detail: state.detail, gpu,
     leaves: showLeaves ? { shape: p.leafShape, colors: state.leafColors } : null,
     growth: state.growth,
   });
@@ -204,7 +205,7 @@ function meshLod(level) {
     group.add(mesh);
   };
   add(g.bark, new THREE.MeshStandardMaterial({ ...barkTex, roughness: 1, metalness: 0 }), 'Bark', false);
-  add(g.leaves, new THREE.MeshStandardMaterial({
+  add(g.leaves, g.cards ? cardMaterial(g.cards) : new THREE.MeshStandardMaterial({
     map: leafTexture(p.leafShape), vertexColors: true, side: THREE.DoubleSide,
     roughness: 0.68, metalness: 0,
   }), 'Foliage', true);
@@ -212,6 +213,22 @@ function meshLod(level) {
   add(g.fungus, epiphyte(0.72), 'Fungus', false);
   group.userData.counts = g.counts;
   return group;
+}
+
+function cardMaterial(layout) {
+  const atlas = document.createElement('canvas');
+  atlas.width = atlas.height = layout.size;
+  paintCards(atlas.getContext('2d'), layout);
+  const map = new THREE.CanvasTexture(atlas);
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.anisotropy = 4;
+  // ponytail: plain mipmaps let alpha coverage shrink with distance; the low
+  // cutoff compensates, coverage-preserving mips would fix it properly
+  const mat = new THREE.MeshStandardMaterial({
+    map, alphaTest: 0.3, side: THREE.DoubleSide, roughness: 0.68, metalness: 0,
+  });
+  mat.userData.baked = true;
+  return mat;
 }
 
 /**
@@ -266,7 +283,7 @@ function bakeAtlas(src, { cx, cz, r, top }) {
 }
 
 function impostorLod() {
-  const src = meshLod(0);
+  const src = meshLod(0, false);
   const [cx, , cz] = built.tree.bounds.center;
   const box = { cx, cz, ...extent(src.children.map((m) => m.geometry), cx, cz) };
   const map = bakeAtlas(src, box);
@@ -288,7 +305,10 @@ function impostorLod() {
   return group;
 }
 
-const lodObject = (level) => (LODS[level].impostor ? impostorLod() : meshLod(level));
+// The full-detail preview skips the vertex-cache reorder to keep slider drags
+// quick; exports rebuild it with the reorder (see doExport).
+const lodObject = (level, gpu = level > 0) => (LODS[level].impostor ? impostorLod() : meshLod(level, gpu));
+const AUTO = LODS.length;
 
 function build({ refit = false, grow = false } = {}) {
   const t0 = performance.now();
@@ -311,34 +331,58 @@ function build({ refit = false, grow = false } = {}) {
   sun.shadow.camera.updateProjectionMatrix();
   windU.h.value = Math.max(1, tree.height);
 
-  const obj = lodObject(state.lod);
-  treeGroup.add(obj);
-  let tris = 0;
-  obj.traverse((o) => { if (o.isMesh) tris += o.geometry.index.count / 3; });
-  const { moss: mossN, fungus: fungusN } = obj.userData.counts;
+  let root, reach = 0;
+  if (state.lod === AUTO) {
+    // switch where the next level's error drops to about a pixel and a half
+    root = new THREE.LOD();
+    const d = lodDistances(Math.max(tree.height, tree.radius * 2),
+      THREE.MathUtils.degToRad(camera.fov), canvas.clientHeight || 800);
+    LODS.forEach((_, i) => root.addLevel(lodObject(i), d[i], 0.1));
+    reach = d[d.length - 1];
+  } else {
+    root = lodObject(state.lod);
+  }
+  treeGroup.add(root);
+  built.root = root;
+  built.ms = performance.now() - t0;
 
   if (refit) frame(tree);
+  // let the camera pull back far enough to reach the billboard
+  if (reach) controls.maxDistance = Math.max(controls.maxDistance, reach * 1.5);
   if (grow) { growStart = performance.now(); clipPlane.constant = 0.001; }
-
-  const ms = performance.now() - t0;
-  const epi = mossN || fungusN
-    ? ` · ${fmt(mossN)} moss · ${fmt(fungusN)} fungi` : '';
-  document.getElementById('stats').textContent =
-    `LOD${state.lod} ${LODS[state.lod].label.toLowerCase()} · ${fmt(tris)} tris · ` +
-    `${fmt(tree.stats.branches)} branches · ${fmt(tree.stats.leaves)} leaves${epi}\n` +
-    `${tree.height.toFixed(1)} m tall · ${(tree.radius * 2).toFixed(1)} m wide · ${ms.toFixed(0)} ms`;
+  showStats();
   document.getElementById('hud-species').textContent = SPECIES[state.species].name;
   document.getElementById('hud-seed').textContent = `seed ${p.seed}`;
 
   history.replaceState(null, '', `?species=${state.species}&seed=${p.seed}` +
     `&season=${state.season}&theme=${state.theme}` +
     (state.detail !== 1 ? `&detail=${state.detail}` : '') +
-    (state.lod ? `&lod=${state.lod}` : '') +
+    (state.lod ? `&lod=${state.lod === AUTO ? 'auto' : state.lod}` : '') +
     (state.growth.enabled ? '&growth=1' : '') +
     (p.mode === 'colonize' ? '&mode=colonize' : ''));
 }
 
 const fmt = (n) => n.toLocaleString('en-US');
+
+const currentLevel = () => (built.root.isLOD ? built.root.getCurrentLevel() : state.lod);
+/** The live object for a level, if the viewport already holds one. */
+const levelObject = (i) => (built.root.isLOD ? built.root.levels[i].object
+  : i === state.lod ? built.root : null);
+
+let shownLevel = -1;
+function showStats() {
+  const { tree, ms } = built;
+  const level = shownLevel = currentLevel();
+  const obj = levelObject(level);
+  let tris = 0;
+  obj.traverse((o) => { if (o.isMesh) tris += o.geometry.index.count / 3; });
+  const { moss, fungus } = obj.userData.counts;
+  const epi = moss || fungus ? ` · ${fmt(moss)} moss · ${fmt(fungus)} fungi` : '';
+  document.getElementById('stats').textContent =
+    `${built.root.isLOD ? 'auto · ' : ''}LOD${level} ${LODS[level].label.toLowerCase()} · ` +
+    `${fmt(tris)} tris · ${fmt(tree.stats.branches)} branches · ${fmt(tree.stats.leaves)} leaves${epi}\n` +
+    `${tree.height.toFixed(1)} m tall · ${(tree.radius * 2).toFixed(1)} m wide · ${ms.toFixed(0)} ms`;
+}
 
 function frame(tree) {
   const h = Math.max(0.5, tree.height);
@@ -716,9 +760,9 @@ toggle('t-leaves', (v) => { state.showLeaves = v; build(); });
 const lodBar = document.getElementById('lod');
 function renderLodBar() {
   lodBar.innerHTML = '';
-  LODS.forEach((L, i) => {
+  [...LODS, { label: 'Switch by camera distance' }].forEach((L, i) => {
     const b = document.createElement('button');
-    b.textContent = `LOD${i}`;
+    b.textContent = i === AUTO ? 'Auto' : `LOD${i}`;
     b.title = L.label;
     b.setAttribute('aria-pressed', String(i === state.lod));
     b.onclick = () => { state.lod = i; renderLodBar(); queue(); };
@@ -789,6 +833,24 @@ menu.onclick = (e) => {
   doExport(btn.dataset.fmt);
 };
 
+/**
+ * Quantize vertex data (KHR_mesh_quantization) and meshopt-compress the
+ * buffers (EXT_meshopt_compression). Loaded on demand: it is only needed here.
+ * three.js, Babylon, Unity glTFast and Godot read the result; Blender does not.
+ */
+async function compressGlb(glb) {
+  const [{ WebIO }, { ALL_EXTENSIONS }, { meshopt }, { MeshoptEncoder }] = await Promise.all([
+    import('@gltf-transform/core'), import('@gltf-transform/extensions'),
+    import('@gltf-transform/functions'), import('meshoptimizer/encoder'),
+  ]);
+  await MeshoptEncoder.ready;
+  const io = new WebIO().registerExtensions(ALL_EXTENSIONS)
+    .registerDependencies({ 'meshopt.encoder': MeshoptEncoder });
+  const doc = await io.readBinary(new Uint8Array(glb));
+  await doc.transform(meshopt({ encoder: MeshoptEncoder, level: 'medium' }));
+  return io.writeBinary(doc);
+}
+
 function exportName(ext, lod) {
   return `${state.species}-${state.params.seed}${lod === undefined ? '' : `-${lod}`}.${ext}`;
 }
@@ -815,10 +877,10 @@ function doExport(fmt) {
   const group = new THREE.Group();
   group.name = name;
   const extra = [];
-  const levels = exportAll ? LODS.map((_, i) => i) : [state.lod];
+  const levels = exportAll ? LODS.map((_, i) => i) : [currentLevel()];
   for (const i of levels) {
-    let src = treeGroup.children[0];
-    if (i !== state.lod) extra.push(src = lodObject(i));
+    let src = i > 0 && levelObject(i);
+    if (!src) extra.push(src = lodObject(i, true));
     const lod = new THREE.Group();
     lod.name = `${name}_LOD${i}`;
     src.traverse((o) => {
@@ -830,7 +892,7 @@ function doExport(fmt) {
     group.add(lod);
   }
   const done = () => extra.forEach(disposeGroup);
-  const tag = exportAll ? 'lods' : `lod${state.lod}`;
+  const tag = exportAll ? 'lods' : `lod${levels[0]}`;
 
   if (fmt === 'obj') {
     save(new OBJExporter().parse(group), exportName('obj', tag), 'text/plain');
@@ -839,9 +901,19 @@ function doExport(fmt) {
     save(new STLExporter().parse(group, { binary: true }), exportName('stl', tag), 'model/stl');
     done();
   } else {
+    const packed = fmt === 'glbz';
+    const fail = (err) => { console.error(err); alert('GLB export failed — see console.'); };
     new GLTFExporter().parse(group,
-      (glb) => { save(glb, exportName('glb', tag), 'model/gltf-binary'); done(); },
-      (err) => { done(); console.error(err); alert('GLB export failed — see console.'); },
+      (glb) => {
+        done();
+        if (!packed) return save(glb, exportName('glb', tag), 'model/gltf-binary');
+        working.hidden = false;
+        compressGlb(glb)
+          .then((out) => save(out, exportName('glb', `${tag}-meshopt`), 'model/gltf-binary'))
+          .catch(fail)
+          .finally(() => { working.hidden = true; });
+      },
+      (err) => { done(); fail(err); },
       { binary: true });
   }
   clipPlane.constant = keep;
@@ -878,6 +950,7 @@ function tick() {
 
   controls.update();
   renderer.render(scene, camera);
+  if (built?.root.isLOD && built.root.getCurrentLevel() !== shownLevel) showStats();
 }
 
 /* ----------------------------------------------------------------- go --- */
@@ -891,7 +964,7 @@ state.params.seed = Math.max(1, +q.get('seed') || 1 + Math.floor(Math.random() *
 if (q.get('mode') === 'colonize') state.params.mode = 'colonize';
 if (q.get('detail')) state.detail = Math.min(1.8, Math.max(0.25, +q.get('detail') || 1));
 if (q.get('growth')) state.growth.enabled = q.get('growth') !== '0';
-state.lod = Math.min(LODS.length - 1, Math.max(0, +q.get('lod') | 0));
+state.lod = q.get('lod') === 'auto' ? AUTO : Math.min(LODS.length - 1, Math.max(0, +q.get('lod') | 0));
 renderLodBar();
 applySeason();
 applyTheme();
