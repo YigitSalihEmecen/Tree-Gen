@@ -11,6 +11,8 @@ import { buildBranchGeometry, buildLeafGeometry, leafOutline, LEAF_SHAPES, leafV
 import { lodGeometry, buildImpostorGeometry, simplifyGeometry, optimizeForGpu, leafCards,
   paintCards } from '../src/lod.js';
 import { buildGrowth, MOSS_TYPES, FUNGUS_TYPES } from '../src/growth.js';
+import { buildLods, LODS } from '../src/lod.js';
+import { buildTreeLevels } from '../src/kit.js';
 
 let pass = 0;
 const test = (name, fn) => {
@@ -348,6 +350,35 @@ test('impostor is three crossed quads spanning the atlas', () => {
   const uv = g.getAttribute('uv').array;
   assert.equal(Math.min(...uv), 0);
   assert.equal(Math.max(...uv), 1);
+});
+
+test('buildLods meshes once and matches per-level lodGeometry', () => {
+  const tree = generateTree({ ...SPECIES.birch.params, seed: 5, density: 0.5 });
+  const o = { leaves: { shape: 'cordate' }, growth: SPECIES.deadwood.growth };
+  const all = buildLods(tree, LODS, o);
+  assert.equal(all[4], null, 'the impostor is baked, not meshed');
+  for (let i = 0; i < 4; i++) {
+    const one = lodGeometry(tree, i, o);
+    assert.equal(all[i].bark.index.count, one.bark.index.count, `LOD${i} bark differs`);
+    assert.equal(all[i].leaves.index.count, one.leaves.index.count, `LOD${i} leaves differ`);
+  }
+  const small = buildLods(tree, [{ error: 0.008, perCard: 24, cardSpan: 0.1, atlas: 256 }], o)[0];
+  assert.ok(small.cards.size <= 256, `atlas ${small.cards.size} px over its cap`);
+});
+
+test('kit builds every level headless, with no canvas and no renderer', () => {
+  const tree = generateTree({ ...SPECIES.pine.params, seed: 2, density: 0.4 });
+  const levels = buildTreeLevels(tree, LODS, { bark: SPECIES.pine.palette.bark,
+    leaves: { shape: 'needle', colors: ['#3b6b38', '#27502a'] } });
+  assert.equal(levels.length, LODS.length);
+  for (let i = 0; i < 4; i++) {
+    const names = levels[i].parts.map((p) => p.name);
+    assert.deepEqual(names, ['Bark', 'Foliage'], `LOD${i}: ${names}`);
+    for (const p of levels[i].parts) assert.ok(p.material.isMaterial);
+  }
+  assert.equal(levels[4].parts.length, 0, 'no renderer, no billboard');
+  levels.forEach((l) => l.dispose());
+  levels.disposeBark();
 });
 
 console.log(`\n${pass} checks passed`);

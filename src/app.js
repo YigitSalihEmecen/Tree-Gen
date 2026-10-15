@@ -10,10 +10,10 @@ import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 
 import { generateTree, mergeParams, SHAPES } from './tree.js';
 import { SPECIES, SPECIES_KEYS, randomSpecies } from './species.js';
-import { LEAF_SHAPES, leafVeins } from './geometry.js';
-import { LODS, IMPOSTOR_VIEWS, lodGeometry, lodDistances, paintCards, extent,
-  buildImpostorGeometry } from './lod.js';
-import { makeBarkTexture, makeLeafTexture, makeEnvironment, BARK_STYLES } from './materials.js';
+import { LEAF_SHAPES } from './geometry.js';
+import { LODS, lodGeometry, lodDistances } from './lod.js';
+import { makeBarkTexture, makeEnvironment, BARK_STYLES } from './materials.js';
+import { leafMaterial, cardMaterial, epiphyteMaterial, bakeImpostor } from './kit.js';
 import { GROWTH_DEFAULTS, MOSS_TYPES, FUNGUS_TYPES } from './growth.js';
 
 /* ------------------------------------------------------------- state ---- */
@@ -112,11 +112,6 @@ ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
-const epiphyte = (rough) => new THREE.MeshStandardMaterial({
-  vertexColors: true, roughness: rough, metalness: 0,
-  side: THREE.DoubleSide,
-});
-
 const treeGroup = new THREE.Group();
 scene.add(treeGroup);
 
@@ -127,13 +122,6 @@ const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const treeClips = [clipPlane, groundPlane];
 const windU = { t: { value: 0 }, amp: { value: 0 }, h: { value: 10 } };
 
-// one leaf texture per venation pattern, built the first time it is needed
-const leafTextures = new Map();
-const leafTexture = (shape) => {
-  const style = leafVeins(shape);
-  if (!leafTextures.has(style)) leafTextures.set(style, makeLeafTexture(style));
-  return leafTextures.get(style);
-};
 let barkTex = null;
 let env = null;
 
@@ -177,8 +165,11 @@ function disposeGroup(group) {
   group.traverse((o) => {
     if (!o.isMesh) return;
     o.geometry.dispose();
-    if (o.material.userData.baked) o.material.map.dispose();
-    o.material.dispose();
+    if (o.material.userData.dispose) o.material.userData.dispose();
+    else {
+      if (o.material.userData.baked) o.material.map.dispose();
+      o.material.dispose();
+    }
   });
 }
 
@@ -205,98 +196,28 @@ function meshLod(level, gpu) {
     group.add(mesh);
   };
   add(g.bark, new THREE.MeshStandardMaterial({ ...barkTex, roughness: 1, metalness: 0 }), 'Bark', false);
-  add(g.leaves, g.cards ? cardMaterial(g.cards) : new THREE.MeshStandardMaterial({
-    map: leafTexture(p.leafShape), vertexColors: true, side: THREE.DoubleSide,
-    roughness: 0.68, metalness: 0,
-  }), 'Foliage', true);
-  add(g.moss, epiphyte(0.97), 'Moss', false);
-  add(g.fungus, epiphyte(0.72), 'Fungus', false);
+  add(g.leaves, g.cards ? cardMaterial(g.cards) : leafMaterial(p.leafShape), 'Foliage', true);
+  add(g.moss, epiphyteMaterial(0.97), 'Moss', false);
+  add(g.fungus, epiphyteMaterial(0.72), 'Fungus', false);
   group.userData.counts = g.counts;
   return group;
 }
 
-function cardMaterial(layout) {
-  const atlas = document.createElement('canvas');
-  atlas.width = atlas.height = layout.size;
-  paintCards(atlas.getContext('2d'), layout);
-  const map = new THREE.CanvasTexture(atlas);
-  map.colorSpace = THREE.SRGBColorSpace;
-  map.anisotropy = 4;
-  // ponytail: plain mipmaps let alpha coverage shrink with distance; the low
-  // cutoff compensates, coverage-preserving mips would fix it properly
-  const mat = new THREE.MeshStandardMaterial({
-    map, alphaTest: 0.3, side: THREE.DoubleSide, roughness: 0.68, metalness: 0,
-  });
-  mat.userData.baked = true;
-  return mat;
-}
-
 /**
- * Photograph `src` from each impostor view into one atlas. Rendered through the
- * live renderer and scene, so the billboard carries the viewport's own lighting,
- * environment, shadows and tone mapping; the material then skips tone mapping
- * so it is not applied twice.
+ * The billboard: LOD0 photographed into an albedo and a normal atlas (kit.js),
+ * so it is lit by this scene's own lights rather than carrying a bake's.
  */
-function bakeAtlas(src, { cx, cz, r, top }) {
-  const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
-  let th = Math.min(1024, buf.y);
-  let tw = Math.round((th * 2 * r) / top);
-  if (tw > Math.min(1024, buf.x)) {
-    tw = Math.min(1024, buf.x);
-    th = Math.round((tw * top) / (2 * r));
-  }
-  tw = Math.max(1, tw); th = Math.max(1, th);
-
-  const atlas = document.createElement('canvas');
-  atlas.width = tw * IMPOSTOR_VIEWS.length;
-  atlas.height = th;
-  const g2 = atlas.getContext('2d');
-
-  const pr = renderer.getPixelRatio();
-  const viewport = renderer.getViewport(new THREE.Vector4());
-  const keep = [clipPlane.constant, windU.amp.value];
-  clipPlane.constant = 1e6;
-  windU.amp.value = 0;
-  ground.visible = treeGroup.visible = false;
-  scene.add(src);
-
-  const d = r * 2 + 0.5;
-  const cam = new THREE.OrthographicCamera(-r, r, top, 0, 0.01, d + r + 1);
-  IMPOSTOR_VIEWS.forEach((a, i) => {
-    cam.position.set(cx + Math.sin(a) * d, 0, cz + Math.cos(a) * d);
-    cam.lookAt(cx, 0, cz);
-    renderer.setViewport(0, 0, tw / pr, th / pr);
-    renderer.render(scene, cam);
-    // GL's viewport origin is bottom-left; the canvas's is top-left
-    g2.drawImage(canvas, 0, canvas.height - th, tw, th, i * tw, 0, tw, th);
-  });
-
-  scene.remove(src);
-  ground.visible = treeGroup.visible = true;
-  [clipPlane.constant, windU.amp.value] = keep;
-  renderer.setViewport(viewport);
-
-  const tex = new THREE.CanvasTexture(atlas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  return tex;
-}
-
 function impostorLod() {
   const src = meshLod(0, false);
   const [cx, , cz] = built.tree.bounds.center;
-  const box = { cx, cz, ...extent(src.children.map((m) => m.geometry), cx, cz) };
-  const map = bakeAtlas(src, box);
-  disposeGroup(src);
-  // ponytail: plain mipmaps let alpha coverage shrink with distance; add
-  // coverage-preserving mips if far billboards look thin
-  const mat = new THREE.MeshBasicMaterial({
-    map, alphaTest: 0.4, side: THREE.DoubleSide, toneMapped: false,
-    wireframe: state.wireframe, clippingPlanes: treeClips, clipShadows: true,
+  const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
+  const { geometry, material } = bakeImpostor(renderer, src, {
+    cx, cz, height: Math.min(1024, buf.y), background: new THREE.Color(state.leafColors[0]),
   });
-  mat.userData.baked = true;
-  windify(mat, false);
-  const mesh = new THREE.Mesh(buildImpostorGeometry(box), mat);
+  disposeGroup(src);
+  Object.assign(material, { wireframe: state.wireframe, clippingPlanes: treeClips, clipShadows: true });
+  windify(material, false);
+  const mesh = new THREE.Mesh(geometry, material);
   mesh.name = 'Billboard';
   mesh.castShadow = true;
   const group = new THREE.Group();

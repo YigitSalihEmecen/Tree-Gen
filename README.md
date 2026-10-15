@@ -57,7 +57,7 @@ generated tree; every level meshes it at full resolution and then optimises the 
 | LOD1 | quadric simplification, 0.2 % error | leaves thinned 25 %, survivors scaled to keep canopy area |
 | LOD2 | quadric simplification, 0.4 % error | cluster cards: ~6 leaves per crossed pair of textured quads |
 | LOD3 | quadric simplification, 0.8 % error | cluster cards: ~24 leaves per pair |
-| LOD4 | — | three-plane crossed billboard baked from LOD0 |
+| LOD4 | — | three-plane crossed billboard baked from LOD0 (albedo + normal atlas) |
 
 Simplification is meshoptimizer's attribute-aware edge collapse with a single error bound in metres
 (a fraction of the tree's size), so triangles go only where the surface stays within the bound and
@@ -112,6 +112,7 @@ src/geometry.js   skeleton → BufferGeometry
 src/materials.js  canvas-drawn bark, leaf and sky textures
 src/growth.js     moss, lichen and fungus forms + scored placement
 src/lod.js        levels of detail: simplification, leaf cluster cards, impostor
+src/kit.js        library entry: materials, billboard bake, every level in one call
 src/app.js        viewport, controls, exporters
 test/             node test suites
 ```
@@ -120,12 +121,39 @@ test/             node test suites
 
 ```bash
 npm install        # only needed for the tests
-npm test           # 29 checks
+npm test           # 31 checks
 ```
 
 They cover determinism, finite geometry, the envelope maths, outward winding, watertightness,
 flat ground contact, triangle and branch budgets, all 16 species, all 31 leaf shapes, all 10
 epiphyte forms, and 120 randomly rolled trees.
+
+## Using it as a library
+
+The generator has no build step and no DOM dependency outside `materials.js`, so a game or
+another tool can import it directly (HighRoads does, as a git submodule). Map `three` and
+`meshoptimizer/simplifier` + `meshoptimizer/encoder` in the host's import map.
+
+```js
+import { generateTree, mergeParams } from './tree-gen/src/tree.js';
+import { SPECIES } from './tree-gen/src/species.js';
+import { LODS } from './tree-gen/src/lod.js';
+import { buildTreeLevels } from './tree-gen/src/kit.js';
+
+const tree = generateTree(mergeParams({ ...SPECIES.oak.params, seed: 4 }));
+const levels = buildTreeLevels(tree, LODS, {
+  renderer,                                   // needed only to bake the billboard
+  bark: SPECIES.oak.palette.bark,
+  leaves: { shape: tree.params.leafShape, colors: SPECIES.oak.palette.leaf.summer },
+});
+// levels[i].parts → [{ name, geometry, material }]; levels[i].dispose(); levels.disposeBark()
+```
+
+`buildLods(tree, specs)` (lod.js) meshes the tree once and derives every level from it; a
+spec is an `LODS` entry or your own `{ error, leafDetail, keep }` / `{ error, perCard,
+cardSpan, atlas }`. The billboard (`bakeImpostor`) is two atlases — unlit albedo and
+view-space normals — so it is lit by the host scene's lights rather than carrying the bake's.
+Without a canvas (Node) textures are null and materials fall back to flat colours.
 
 ## Known limits
 
