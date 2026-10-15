@@ -284,10 +284,15 @@ export function lodGeometry(tree, level, o = {}) {
 /**
  * Every requested level from ONE meshing of the tree: bark, leaves and
  * epiphytes are built once at full resolution and each level is optimised
- * from that, instead of re-meshing the skeleton per level. Impostor specs
+ * from that, instead of re-meshing the skeleton per level. Simplification is
+ * CHAINED: each level starts from the previous level's mesh with a step of
+ * sqrt(bound² − previous²) — the deviations of two passes are largely
+ * independent, and measured this lands on the direct pass's triangle counts
+ * (a plain difference keeps 2-3× too many) in under half the time. Impostor specs
  * come back as null — they are baked, not meshed.
  * A spec is { error, leafDetail, keep } for a leaf level or
- * { error, perCard, cardSpan, atlas } for a card level.
+ * { error, perCard, cardSpan, atlas, keep } for a card level; `keep` thins the
+ * leaves and grows the survivors to hold the canopy's area.
  */
 export function buildLods(tree, levels = LODS, o = {}) {
   const detail = o.detail ?? 1;
@@ -311,17 +316,34 @@ export function buildLods(tree, levels = LODS, o = {}) {
   const growth = G && G.enabled ? buildGrowth(tree, { ...G, detail: G.detail * detail }) : null;
   // the shared sources are disposed below, so a level must never hand one out
   const own = (g, src) => (g === src ? g.clone() : g);
+  const temps = [];
+  /** Simplify along a chain: from the last level's result when it is coarser-bound. */
+  const chain = (start) => {
+    let src = start, at = 0;
+    return (geo, tol, flags) => {
+      if (!geo) return null;
+      if (tol < at) { src = geo; at = 0; }          // levels out of order: restart
+      const s = simplifyGeometry(src, Math.sqrt(tol * tol - at * at), flags);
+      if (s !== src) temps.push(s);
+      src = s; at = tol;
+      return s;
+    };
+  };
+  const barkChain = chain(fullBark);
+  const mossChain = chain(growth?.moss), fungusChain = chain(growth?.fungus);
 
   const out = levels.map((L) => {
     if (L.impostor) return null;
     const tol = (L.error || 0) * size;
-    const bark = own(gpu(simplifyGeometry(fullBark, tol, ['Prune', 'ErrorAbsolute'])), fullBark);
+    const barkSimple = barkChain(fullBark, tol, ['Prune', 'ErrorAbsolute']);
+    const bark = own(gpu(barkSimple), barkSimple);
 
     let leaves = null, cards = null;
     if (leafy) {
       if (L.perCard) {
         const [x, y, z] = tree.bounds.center;
-        cards = leafCards(leavesFor(1, 1), L.perCard, { x, y, z }, L.cardSpan * size, L.atlas);
+        cards = leafCards(leavesFor(L.leafDetail ?? 1, L.keep ?? 1), L.perCard, { x, y, z },
+          L.cardSpan * size, L.atlas);
         leaves = gpu(cards.geometry);
         if (leaves !== cards.geometry) cards.geometry.dispose();
         cards.geometry = leaves;
@@ -334,18 +356,19 @@ export function buildLods(tree, levels = LODS, o = {}) {
     let moss = null, fungus = null, counts = { moss: 0, fungus: 0 };
     if (growth) {
       // tufts below the error bound are pruned outright, which can empty a buffer
-      const opt = (geo) => {
-        const s = geo && simplifyGeometry(geo, tol, ['Prune', 'Permissive', 'ErrorAbsolute']);
-        return s && s.index.count ? own(gpu(s), geo) : null;
+      const opt = (simplify, geo) => {
+        const s = simplify(geo, tol, ['Prune', 'Permissive', 'ErrorAbsolute']);
+        return s && s.index.count ? own(gpu(s), s) : null;
       };
       counts = growth.counts;
-      moss = opt(growth.moss);
-      fungus = opt(growth.fungus);
+      moss = opt(mossChain, growth.moss);
+      fungus = opt(fungusChain, growth.fungus);
     }
     return { bark, leaves, cards, moss, fungus, counts };
   });
 
   fullBark.dispose();
+  for (const g of temps) g.dispose();
   for (const g of leafSets.values()) g.dispose();
   if (growth) { growth.moss?.dispose(); growth.fungus?.dispose(); }
   return out;

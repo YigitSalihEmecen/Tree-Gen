@@ -352,15 +352,19 @@ test('impostor is three crossed quads spanning the atlas', () => {
   assert.equal(Math.max(...uv), 1);
 });
 
-test('buildLods meshes once and matches per-level lodGeometry', () => {
+test('buildLods chains the levels and lands near per-level lodGeometry', () => {
   const tree = generateTree({ ...SPECIES.birch.params, seed: 5, density: 0.5 });
   const o = { leaves: { shape: 'cordate' }, growth: SPECIES.deadwood.growth };
   const all = buildLods(tree, LODS, o);
   assert.equal(all[4], null, 'the impostor is baked, not meshed');
   for (let i = 0; i < 4; i++) {
     const one = lodGeometry(tree, i, o);
-    assert.equal(all[i].bark.index.count, one.bark.index.count, `LOD${i} bark differs`);
+    // chained simplification spends the same error budget from a coarser start;
+    // on sparse trees it prunes a little deeper at the coarsest level
+    const r = all[i].bark.index.count / one.bark.index.count;
+    assert.ok(r > 0.5 && r < 1.3, `LOD${i} bark ${(r * 100).toFixed(0)}% of the direct result`);
     assert.equal(all[i].leaves.index.count, one.leaves.index.count, `LOD${i} leaves differ`);
+    if (i) assert.ok(all[i].bark.index.count < all[i - 1].bark.index.count, `LOD${i} not cheaper`);
   }
   const small = buildLods(tree, [{ error: 0.008, perCard: 24, cardSpan: 0.1, atlas: 256 }], o)[0];
   assert.ok(small.cards.size <= 256, `atlas ${small.cards.size} px over its cap`);
