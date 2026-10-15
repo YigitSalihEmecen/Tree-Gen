@@ -143,7 +143,9 @@ function applyTheme() {
 /* -------------------------------------------------------- tree building - */
 
 function windify(mat, leafy) {
-  mat.onBeforeCompile = (shader) => {
+  const base = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, r) => {
+    base.call(mat, shader, r);
     shader.uniforms.uTime = windU.t;
     shader.uniforms.uWind = windU.amp;
     shader.uniforms.uH = windU.h;

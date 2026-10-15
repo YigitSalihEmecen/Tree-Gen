@@ -149,9 +149,12 @@ const levels = buildTreeLevels(tree, LODS, {
 // levels[i].parts → [{ name, geometry, material }]; levels[i].dispose(); levels.disposeBark()
 ```
 
-`buildLods(tree, specs)` (lod.js) meshes the tree once and derives every level from it; a
-spec is an `LODS` entry or your own `{ error, leafDetail, keep }` / `{ error, perCard,
-cardSpan, atlas }`. The billboard (`bakeImpostor`) is two atlases — unlit albedo and
+`buildLods(tree, specs)` (lod.js) meshes the tree once and derives every level from it,
+chaining the simplification level to level; a spec is an `LODS` entry or your own
+`{ error, leafDetail, keep }` / `{ error, perCard, cardSpan, atlas, keep }` (`keep` thins
+the leaves and grows the survivors to hold the canopy's area). `buildLods` needs no DOM,
+so it runs in a worker; `dressLevels(geos, specs, o)` then adds materials and bakes the
+billboard on the main thread (pass a pre-painted card atlas as `cards.image`). The billboard (`bakeImpostor`) is two atlases — unlit albedo and
 view-space normals — so it is lit by the host scene's lights rather than carrying the bake's.
 Without a canvas (Node) textures are null and materials fall back to flat colours.
 

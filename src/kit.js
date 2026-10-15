@@ -52,21 +52,44 @@ export function leafMaterial(shape) {
   });
 }
 
-/** Cluster cards: paints the layout's atlas (see lod.js:leafCards) and cuts it out. */
+/**
+ * Cluster cards: paints the layout's atlas (see lod.js:leafCards) and cuts it
+ * out. `layout.image` — an atlas already painted elsewhere (a worker's
+ * ImageBitmap, flipped to v-up and premultiplied) — is used as it is.
+ * The material carries an onBeforeCompile; a host patching it should chain it.
+ */
 export function cardMaterial(layout, { anisotropy = 4 } = {}) {
-  const ctx = canvas2d(layout.size, layout.size);
   let map = null;
-  if (ctx) {
-    paintCards(ctx, layout);
-    map = new THREE.CanvasTexture(ctx.canvas);
+  if (layout.image) {
+    map = new THREE.Texture(layout.image);
+    map.flipY = false;                 // an ImageBitmap ignores it; painted pre-flipped
+    map.needsUpdate = true;
+  } else {
+    const ctx = canvas2d(layout.size, layout.size);
+    if (ctx) {
+      paintCards(ctx, layout);
+      map = new THREE.CanvasTexture(ctx.canvas);
+    }
+  }
+  if (map) {
     map.colorSpace = THREE.SRGBColorSpace;
     map.anisotropy = anisotropy;
+    // Premultiplied, so the mipmaps average leaf colour with nothing rather
+    // than with the transparent black around it (which darkened every card
+    // level at a distance); the shader divides it back out.
+    map.premultiplyAlpha = true;
   }
   // ponytail: plain mipmaps let alpha coverage shrink with distance; the low
   // cutoff compensates, coverage-preserving mips would fix it properly
   const mat = new THREE.MeshStandardMaterial({
     map, alphaTest: map ? 0.3 : 0, side: THREE.DoubleSide, roughness: 0.68, metalness: 0,
   });
+  if (map) {
+    mat.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>',
+        '#include <map_fragment>\n\tdiffuseColor.rgb /= max( sampledDiffuseColor.a, 1e-3 );');
+    };
+  }
   mat.userData.baked = !!map;
   return mat;
 }
@@ -90,7 +113,9 @@ export function impostorBox(object, cx = 0, cz = 0) {
  * space IS the quad's tangent space and the normal atlas works as a plain
  * normal map: the billboard is lit by whatever scene it ends up in, under any
  * sky, instead of carrying the bake's lighting.
- * The atlases are read back into DataTextures, so exporters can write them.
+ * The atlases are read back into DataTextures, so exporters can write them;
+ * `readback: false` keeps them on the GPU as render targets (no pipeline
+ * stall — for hosts that only draw).
  * @returns {{geometry, material, box}} `material.userData.dispose()` frees
  *          the material and both atlases.
  */
@@ -100,9 +125,14 @@ export function bakeImpostor(renderer, source, o = {}) {
   const th = o.height ?? 256;
   const tw = Math.max(1, Math.min(th * 2, Math.round((th * 2 * box.r) / box.top)));
   const W = tw * views.length;
+  const readback = o.readback ?? true;
   const target = (colorSpace) => {
-    const rt = new THREE.WebGLRenderTarget(W, th, { colorSpace });
+    const rt = new THREE.WebGLRenderTarget(W, th, readback ? { colorSpace } : {
+      colorSpace, generateMipmaps: true,
+      minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter,
+    });
     rt.texture.colorSpace = colorSpace;
+    if (!readback) rt.texture.anisotropy = o.anisotropy ?? 4;
     return rt;
   };
   // the stored bytes come back as they are (sRGB-encoded for the albedo)
@@ -175,12 +205,14 @@ export function bakeImpostor(renderer, source, o = {}) {
 
   // ponytail: plain mipmaps let alpha coverage shrink with distance; add
   // coverage-preserving mips if far billboards look thin
-  const map = read(albedo), normalMap = read(normals);
+  const [map, normalMap] = readback ? [read(albedo), read(normals)] : [albedo.texture, normals.texture];
   const material = new THREE.MeshStandardMaterial({
     map, normalMap, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.85, metalness: 0,
   });
   material.userData.baked = true;
-  material.userData.dispose = () => { map.dispose(); normalMap.dispose(); material.dispose(); };
+  material.userData.dispose = readback
+    ? () => { map.dispose(); normalMap.dispose(); material.dispose(); }
+    : () => { albedo.dispose(); normals.dispose(); material.dispose(); };
   return { geometry: buildImpostorGeometry(box, views), material, box };
 }
 
@@ -191,16 +223,27 @@ export function bakeImpostor(renderer, source, o = {}) {
  * @param {object} o { renderer, detail, gpu, growth,
  *                     bark: palette bark | a material to share,
  *                     barkSize, leaves: { shape, colors } | null,
- *                     impostor: { height, views } }
+ *                     impostor: { height, views, readback } }
  * @returns {Array<{parts: Array<{name, geometry, material}>, counts, dispose()}>}
  */
 export function buildTreeLevels(tree, levels, o = {}) {
-  const geos = buildLods(tree, levels, o);
+  return dressLevels(buildLods(tree, levels, o), levels, {
+    ...o, center: tree.bounds.center, seed: tree.params.seed,
+    leaves: o.leaves && { ...o.leaves, shape: o.leaves.shape || tree.params.leafShape },
+  });
+}
+
+/**
+ * The material half of buildTreeLevels, for geometry built elsewhere (a
+ * worker running buildLods): `geos` is buildLods' output.
+ * @param {object} o as buildTreeLevels, plus { center: tree.bounds.center, seed }
+ */
+export function dressLevels(geos, levels, o = {}) {
   const bark = o.bark?.isMaterial ? o.bark
     : barkMaterial(o.bark || { base: '#5a4a3a', dark: '#2a2018', light: '#7a6a58' },
-      { size: o.barkSize ?? 512, seed: tree.params.seed });
+      { size: o.barkSize ?? 512, seed: o.seed ?? 1 });
   const ownsBark = !o.bark?.isMaterial;
-  const shape = o.leaves?.shape || tree.params.leafShape;
+  const shape = o.leaves?.shape;
 
   const mesh = (g) => {
     const parts = [];
@@ -218,15 +261,15 @@ export function buildTreeLevels(tree, levels, o = {}) {
     if (!L.impostor || !o.renderer || src < 0) return;
     const group = new THREE.Group();
     for (const p of out[src].parts) group.add(new THREE.Mesh(p.geometry, p.material));
-    const [cx, , cz] = tree.bounds.center;
+    const [cx, , cz] = o.center || [0, 0, 0];
     const leaf = o.leaves?.colors?.[0];
     const { geometry, material } = bakeImpostor(o.renderer, group, {
       cx, cz, height: o.impostor?.height, views: o.impostor?.views,
+      readback: o.impostor?.readback,
       background: leaf ? new THREE.Color(leaf) : undefined,
     });
     out[i].parts.push({ name: 'Billboard', geometry, material });
   });
-
   for (const level of out) {
     level.dispose = () => {
       for (const p of level.parts) {
