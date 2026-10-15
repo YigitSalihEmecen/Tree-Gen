@@ -137,7 +137,7 @@ function clusterLeaves(cent, n, max, maxSpan) {
  * @returns {{geometry, cards, tile, cols, size}} pass the result to paintCards
  *          for the atlas the quads' UVs point into.
  */
-export function leafCards(leaves, perCard, crown, maxSpan = Infinity) {
+export function leafCards(leaves, perCard, crown, maxSpan = Infinity, atlas = 2048) {
   const n = leaves.userData.leafCount;
   const pos = leaves.getAttribute('position').array;
   const col = leaves.getAttribute('color').array;
@@ -154,7 +154,7 @@ export function leafCards(leaves, perCard, crown, maxSpan = Infinity) {
 
   // two crossed cards per cluster, so it still has body seen edge-on
   const cols = Math.ceil(Math.sqrt(groups.length * 2));
-  const tile = Math.max(8, Math.min(128, Math.floor(2048 / cols)));
+  const tile = Math.max(8, Math.min(128, Math.floor(atlas / cols)));
   const size = cols * tile;
   const inner = (tile - 2) / size;          // a texel of padding stops mip bleed
   const P = [], N = [], UV = [], I = [], cards = [];
@@ -269,52 +269,86 @@ export function paintCards(ctx, { cards, tile, cols, size }) {
 /* ------------------------------------------------------------------ levels */
 
 /**
- * Geometry for one mesh level (0–3). Level 4 is a billboard and is baked from
- * level 0 by the renderer — see buildImpostorGeometry.
+ * Geometry for one mesh level (0–3, or a level spec shaped like LODS[i]).
+ * Level 4 is a billboard and is baked from a mesh level by the renderer — see
+ * kit.js:bakeImpostor.
  * @param {object} o { detail, leaves: {shape, colors} | null, growth,
  *                     gpu (reorder buffers for the vertex cache; default true) }
  * @returns {{bark, leaves, cards, moss, fungus, counts}} `cards` is the
  *          leafCards layout (atlas still to paint) when the level uses cards.
  */
 export function lodGeometry(tree, level, o = {}) {
-  const L = LODS[level];
+  return buildLods(tree, [typeof level === 'number' ? LODS[level] : level], o)[0];
+}
+
+/**
+ * Every requested level from ONE meshing of the tree: bark, leaves and
+ * epiphytes are built once at full resolution and each level is optimised
+ * from that, instead of re-meshing the skeleton per level. Impostor specs
+ * come back as null — they are baked, not meshed.
+ * A spec is { error, leafDetail, keep } for a leaf level or
+ * { error, perCard, cardSpan, atlas } for a card level.
+ */
+export function buildLods(tree, levels = LODS, o = {}) {
   const detail = o.detail ?? 1;
   // one bound in metres for every part, so moss is judged against the tree's
   // size rather than against its own much smaller extent
   const size = Math.max(tree.height, tree.radius * 2);
-  const tol = L.error * size;
   const gpu = (o.gpu ?? true) ? optimizeForGpu : (g) => g;
-  const bark = gpu(simplifyGeometry(buildBranchGeometry(tree, { detail }), tol,
-    ['Prune', 'ErrorAbsolute']));
 
-  let leaves = null, cards = null;
-  if (o.leaves && tree.leaves.length) {
-    const full = buildLeafGeometry(tree, { ...o.leaves, curl: 1,
-      detail: detail * (L.leafDetail ?? 1), keep: L.keep ?? 1 });
-    if (L.perCard) {
-      const [x, y, z] = tree.bounds.center;
-      cards = leafCards(full, L.perCard, { x, y, z }, L.cardSpan * size);
-      leaves = gpu(cards.geometry);
-      full.dispose();
-    } else {
-      leaves = gpu(full);
+  const fullBark = buildBranchGeometry(tree, { detail });
+  const leafy = o.leaves && tree.leaves.length;
+  const leafSets = new Map();
+  const leavesFor = (leafDetail, keep) => {
+    const key = `${leafDetail}|${keep}`;
+    if (!leafSets.has(key)) {
+      leafSets.set(key, buildLeafGeometry(tree, { ...o.leaves, curl: 1,
+        detail: detail * leafDetail, keep }));
     }
-  }
-
-  let moss = null, fungus = null, counts = { moss: 0, fungus: 0 };
+    return leafSets.get(key);
+  };
   const G = o.growth;
-  if (G && G.enabled) {
-    const g = buildGrowth(tree, { ...G, detail: G.detail * detail });
-    // tufts below the error bound are pruned outright, which can empty a buffer
-    const opt = (geo) => {
-      const s = geo && simplifyGeometry(geo, tol, ['Prune', 'Permissive', 'ErrorAbsolute']);
-      return s && s.index.count ? gpu(s) : null;
-    };
-    ({ counts } = g);
-    moss = opt(g.moss);
-    fungus = opt(g.fungus);
-  }
-  return { bark, leaves, cards, moss, fungus, counts };
+  const growth = G && G.enabled ? buildGrowth(tree, { ...G, detail: G.detail * detail }) : null;
+  // the shared sources are disposed below, so a level must never hand one out
+  const own = (g, src) => (g === src ? g.clone() : g);
+
+  const out = levels.map((L) => {
+    if (L.impostor) return null;
+    const tol = (L.error || 0) * size;
+    const bark = own(gpu(simplifyGeometry(fullBark, tol, ['Prune', 'ErrorAbsolute'])), fullBark);
+
+    let leaves = null, cards = null;
+    if (leafy) {
+      if (L.perCard) {
+        const [x, y, z] = tree.bounds.center;
+        cards = leafCards(leavesFor(1, 1), L.perCard, { x, y, z }, L.cardSpan * size, L.atlas);
+        leaves = gpu(cards.geometry);
+        if (leaves !== cards.geometry) cards.geometry.dispose();
+        cards.geometry = leaves;
+      } else {
+        const src = leavesFor(L.leafDetail ?? 1, L.keep ?? 1);
+        leaves = own(gpu(src), src);
+      }
+    }
+
+    let moss = null, fungus = null, counts = { moss: 0, fungus: 0 };
+    if (growth) {
+      // tufts below the error bound are pruned outright, which can empty a buffer
+      const opt = (geo) => {
+        const s = geo && simplifyGeometry(geo, tol, ['Prune', 'Permissive', 'ErrorAbsolute']);
+        return s && s.index.count ? own(gpu(s), geo) : null;
+      };
+      counts = growth.counts;
+      moss = opt(growth.moss);
+      fungus = opt(growth.fungus);
+    }
+    return { bark, leaves, cards, moss, fungus, counts };
+  });
+
+  fullBark.dispose();
+  for (const g of leafSets.values()) g.dispose();
+  if (growth) { growth.moss?.dispose(); growth.fungus?.dispose(); }
+  return out;
 }
 
 /** Horizontal reach about (cx, cz) and top height of a set of geometries. */
