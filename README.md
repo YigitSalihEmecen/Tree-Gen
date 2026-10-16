@@ -20,6 +20,9 @@ from a CDN through an import map. Any static server will do.
 - **16 species presets**, from a quaking aspen to a saguaro cactus. Four of them are the
   parameter sets published in Weber & Penn's 1995 paper; the rest are hand-tuned in the same
   model.
+- **10 bush presets**, bramble to common reed. A bush is a clump: several stems of the same
+  model grown from one stool, each leaning outward (`src/bush.js`). **Clump** puts any tree on
+  a multi-stemmed stool too.
 - **Two generators.** A recursive parametric model, and a space-colonization model that grows
   a crown by competing for space. Any species can be switched between them.
 - **~60 live controls** — trunk taper and flare, per-level branching, crown envelope,
@@ -37,7 +40,9 @@ from a CDN through an import map. Any static server will do.
 | Panel | What it does |
 |---|---|
 | **Species** | 16 presets. Picking one replaces everything below. |
+| **Bushes** | 10 shrub presets, the same way. |
 | **Form** | Model, seed, height, crown shape, bare trunk, recursion levels, detail budget, experimental forms. |
+| **Clump** | Stems from the stool, stool width, how far each stem leans out. |
 | **Trunk** | Thickness, taper mode, root flare, cross-section lobes, curve and S-curve, splits. |
 | **Branches** | Per level: count, relative length, down angle and spread, spiral angle, curve, splits, taper. |
 | **Crown shaping** | Vertical attraction and the pruning envelope. |
@@ -108,6 +113,7 @@ index.html        shell, import map, about dialog
 styles.css        two themes, custom controls, responsive
 src/tree.js       both generators — pure JS, no DOM, no three.js
 src/species.js    16 parameter sets, palettes, the random-tree roller
+src/bush.js       bushes: multi-stem clumps of the same model, 10 presets
 src/geometry.js   skeleton → BufferGeometry
 src/materials.js  canvas-drawn bark, leaf and sky textures
 src/growth.js     moss, lichen and fungus forms + scored placement
@@ -121,11 +127,11 @@ test/             node test suites
 
 ```bash
 npm install        # only needed for the tests
-npm test           # 31 checks
+npm test           # 32 checks
 ```
 
 They cover determinism, finite geometry, the envelope maths, outward winding, watertightness,
-flat ground contact, triangle and branch budgets, all 16 species, all 31 leaf shapes, all 10
+flat ground contact, triangle and branch budgets, all 16 species, all 10 bushes, all 31 leaf shapes, all 10
 epiphyte forms, and 120 randomly rolled trees.
 
 ## Using it as a library
@@ -147,6 +153,16 @@ const levels = buildTreeLevels(tree, LODS, {
   leaves: { shape: tree.params.leafShape, colors: SPECIES.oak.palette.leaf.summer },
 });
 // levels[i].parts → [{ name, geometry, material }]; levels[i].dispose(); levels.disposeBark()
+```
+
+A bush goes through the same calls; only the skeleton comes from `generateBush`
+(`src/bush.js`), which returns exactly what `generateTree` does:
+
+```js
+import { BUSHES, generateBush } from './tree-gen/src/bush.js';
+const bush = generateBush({ ...BUSHES.hazel.params, seed: 4 });
+const levels = buildTreeLevels(bush, LODS, { renderer, bark: BUSHES.hazel.palette.bark,
+  leaves: { colors: BUSHES.hazel.palette.leaf.summer } });
 ```
 
 `buildLods(tree, specs)` (lod.js) meshes the tree once and derives every level from it,

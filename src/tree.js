@@ -50,7 +50,7 @@ const norm = (a) => {
 };
 
 // quaternions as [x, y, z, w]
-const qmul = (a, b) => [
+export const qmul = (a, b) => [
   a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
   a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
   a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
@@ -60,8 +60,8 @@ const qnorm = (q) => {
   const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
   return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
 };
-const qx = (a) => [Math.sin(a / 2), 0, 0, Math.cos(a / 2)];
-const qy = (a) => [0, Math.sin(a / 2), 0, Math.cos(a / 2)];
+export const qx = (a) => [Math.sin(a / 2), 0, 0, Math.cos(a / 2)];
+export const qy = (a) => [0, Math.sin(a / 2), 0, Math.cos(a / 2)];
 const qAxis = (ax, a) => {
   const s = Math.sin(a / 2);
   return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(a / 2)];
@@ -135,6 +135,12 @@ export const DEFAULTS = {
   rotateV:     [0, 0, 0, 0],
   branches:    [0, 50, 30, 10],
   baseSplits: 0,
+
+  // clump (bush.js): stems from one stool, its radius as a fraction of the
+  // height, and how far each stem leans out, degrees
+  stems: 1,
+  stemSpread: 0.12,
+  stemLean: 18,
 
   // foliage
   leaves: 25,              // per parent stem; negative = fan (palm fronds)
@@ -218,9 +224,14 @@ export function shapeRatio(shape, ratio, p) {
  */
 export function generateTree(userParams = {}) {
   const p = mergeParams(userParams);
-  const t0 = (typeof performance !== 'undefined' ? performance : Date).now();
-  const out = p.mode === 'colonize' ? colonize(p) : parametric(p);
+  const t0 = now();
+  return measure(p.mode === 'colonize' ? colonize(p) : parametric(p), p, t0);
+}
 
+const now = () => (typeof performance !== 'undefined' ? performance : Date).now();
+
+/** Bounds, height, reach and stats for a grown skeleton `{ branches, leaves }`. */
+export function measure(out, p, t0 = now()) {
   // bounds + an exact bounding sphere, so a leaning tree still frames correctly
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
   // A leaf is stored by its attachment point, so its blade has to be added back
@@ -253,7 +264,7 @@ export function generateTree(userParams = {}) {
   out.stats = {
     branches: out.branches.length,
     leaves: out.leaves.length,
-    ms: (typeof performance !== 'undefined' ? performance : Date).now() - t0,
+    ms: now() - t0,
   };
   return out;
 }

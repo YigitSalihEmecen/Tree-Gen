@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { generateTree, shapeRatio, rng, mergeParams } from '../src/tree.js';
 import { SPECIES, SPECIES_KEYS } from '../src/species.js';
+import { BUSHES, BUSH_KEYS, generateBush } from '../src/bush.js';
 
 let pass = 0;
 const test = (name, fn) => {
@@ -106,6 +107,23 @@ test('every species builds a complete tree', () => {
       assert.equal(deepest, t.params.levels - 1, `${k}: only reached level ${deepest}`);
     }
   }
+});
+
+test('every bush grows a deterministic clump of rooted stems', () => {
+  for (const k of BUSH_KEYS) {
+    const params = { ...BUSHES[k].params, seed: 5 };
+    const t = generateBush(params);
+    const rooted = t.branches.filter((b) => b.level === 0 && Math.abs(b.pts[0].y) < 1e-9);
+    assert.equal(rooted.length, params.stems, `${k}: ${rooted.length} of ${params.stems} stems on the ground`);
+    assert.ok(t.leaves.length > 0, `${k}: no foliage`);
+    assert.ok(t.height > 0.3 && Number.isFinite(t.bounds.sphere), `${k}: height ${t.height}`);
+    assert.ok(t.leaves.length <= t.params.maxLeaves, `${k}: over leaf budget`);
+    const again = generateBush(params);
+    assert.deepEqual(again.branches[3].pts.map((p) => p.x), t.branches[3].pts.map((p) => p.x), `${k}: not deterministic`);
+  }
+  // one stem is exactly a tree
+  const one = { ...SPECIES.oak.params, seed: 4 };
+  assert.equal(generateBush(one).branches.length, generateTree(one).branches.length);
 });
 
 test('space colonization produces a connected, thinning tree', () => {
