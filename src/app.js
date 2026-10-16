@@ -8,8 +8,9 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 
-import { generateTree, mergeParams, SHAPES } from './tree.js';
+import { mergeParams, SHAPES } from './tree.js';
 import { SPECIES, SPECIES_KEYS, randomSpecies } from './species.js';
+import { generateBush, BUSHES, BUSH_KEYS } from './bush.js';
 import { LEAF_SHAPES } from './geometry.js';
 import { LODS, lodGeometry, lodDistances } from './lod.js';
 import { makeBarkTexture, makeEnvironment, BARK_STYLES } from './materials.js';
@@ -35,6 +36,9 @@ const state = {
   growth: null,
 };
 
+/** A tree or a bush preset: both have the same shape. */
+const preset = (key) => SPECIES[key] || BUSHES[key];
+
 const cloneGrowth = (g) => ({
   ...GROWTH_DEFAULTS, ...g,
   moss: { ...GROWTH_DEFAULTS.moss, ...(g && g.moss) },
@@ -42,7 +46,7 @@ const cloneGrowth = (g) => ({
 });
 
 function loadSpecies(key, seed) {
-  const sp = SPECIES[key];
+  const sp = preset(key);
   state.species = key;
   state.growth = cloneGrowth(sp.growth);
   state.params = mergeParams({
@@ -55,7 +59,7 @@ function loadSpecies(key, seed) {
 }
 
 function leafPalette() {
-  const sp = SPECIES[state.species];
+  const sp = preset(state.species);
   const L = sp.palette.leaf;
   if (state.season === 'winter') return L.winter || (sp.evergreen ? L.summer : null);
   return L[state.season] || L.summer;
@@ -237,7 +241,7 @@ function build({ refit = false, grow = false } = {}) {
   const t0 = performance.now();
   const p = { ...state.params, density: state.detail };
   const showLeaves = state.showLeaves && state.showLeavesSeason && p.leaves !== 0;
-  const tree = generateTree(p);
+  const tree = generateBush(p);
   current = tree;
   built = { tree, p, showLeaves };
 
@@ -274,7 +278,7 @@ function build({ refit = false, grow = false } = {}) {
   if (reach) controls.maxDistance = Math.max(controls.maxDistance, reach * 1.5);
   if (grow) { growStart = performance.now(); clipPlane.constant = 0.001; }
   showStats();
-  document.getElementById('hud-species').textContent = SPECIES[state.species].name;
+  document.getElementById('hud-species').textContent = preset(state.species).name;
   document.getElementById('hud-seed').textContent = `seed ${p.seed}`;
 
   history.replaceState(null, '', `?species=${state.species}&seed=${p.seed}` +
@@ -337,7 +341,8 @@ function schema() {
   const sc = p.mode === 'colonize';
 
   return [
-    { title: 'Species', open: true, rows: [{ type: 'species' }, { type: 'note' }] },
+    { title: 'Species', open: true, rows: [{ type: 'species', keys: SPECIES_KEYS }, { type: 'note' }] },
+    { title: 'Bushes', open: true, rows: [{ type: 'species', keys: BUSH_KEYS }] },
 
     { title: 'Form', open: true, rows: [
       { type: 'seg', label: 'Model', value: p.mode,
@@ -354,6 +359,12 @@ function schema() {
         label: 'Detail', min: 0.25, max: 1.8, step: 0.05 },
       ...(sc ? [] : [{ type: 'range', key: 'oddity', label: 'Experimental forms',
         min: 0, max: 1, step: 0.01, pct: true }]),
+    ] },
+
+    { title: 'Clump', open: p.stems > 1, rows: [
+      { type: 'range', key: 'stems', label: 'Stems', min: 1, max: 24, step: 1 },
+      { type: 'range', key: 'stemSpread', label: 'Stool width', min: 0, max: 0.6, step: 0.01 },
+      { type: 'range', key: 'stemLean', label: 'Stem lean', min: 0, max: 70, step: 1, unit: '°' },
     ] },
 
     ...(sc ? [] : [{ title: 'Trunk', open: false, rows: [
@@ -519,10 +530,10 @@ function makeRow(row, p) {
 
   if (row.type === 'species') {
     wrap.className = 'species';
-    for (const k of SPECIES_KEYS) {
+    for (const k of row.keys) {
       const b = document.createElement('button');
       b.className = 'chip';
-      b.textContent = SPECIES[k].name;
+      b.textContent = preset(k).name;
       b.setAttribute('aria-pressed', String(k === state.species));
       b.onclick = () => { loadSpecies(k); renderControls(); queue(true); };
       wrap.appendChild(b);
@@ -532,7 +543,7 @@ function makeRow(row, p) {
 
   if (row.type === 'note') {
     wrap.className = 'note';
-    wrap.textContent = SPECIES[state.species].note ||
+    wrap.textContent = preset(state.species).note ||
       'Parametric model after Weber & Penn (SIGGRAPH ’95).';
     return wrap;
   }
@@ -779,7 +790,7 @@ function exportName(ext, lod) {
 }
 
 function doExport(fmt) {
-  const name = SPECIES[state.species].name;
+  const name = preset(state.species).name;
   if (fmt === 'json') {
     save(JSON.stringify({ species: state.species, name, season: state.season,
       bark: state.bark, leafColors: state.leafColors, growth: state.growth,
@@ -880,7 +891,7 @@ function tick() {
 
 // A tree is fully described by species + seed + season, so the URL can carry it.
 const q = new URLSearchParams(location.search);
-loadSpecies(SPECIES[q.get('species')] ? q.get('species') : 'aspen');
+loadSpecies(preset(q.get('species')) ? q.get('species') : 'aspen');
 if (q.get('season')) state.season = q.get('season');
 if (q.get('theme')) state.theme = q.get('theme') === 'dark' ? 'dark' : 'light';
 state.params.seed = Math.max(1, +q.get('seed') || 1 + Math.floor(Math.random() * 99999));
