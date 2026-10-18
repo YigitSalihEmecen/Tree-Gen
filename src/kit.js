@@ -32,9 +32,12 @@ const canDraw = () => (drawable ??= !!canvas2d(1, 1));
 export function barkMaterial(bark, { size = 512, seed = 1, anisotropy = 8 } = {}) {
   const maps = canDraw() ? makeBarkTexture(bark, size, seed) : {};
   for (const t of Object.values(maps)) t.anisotropy = anisotropy;
-  return new THREE.MeshStandardMaterial({
+  const mat = new THREE.MeshStandardMaterial({
     ...maps, color: maps.map ? 0xffffff : new THREE.Color(bark.base), roughness: 1, metalness: 0,
   });
+  // The billboard bake clears to this behind a leafless tree (see dressLevels).
+  mat.userData.base = bark.base;
+  return mat;
 }
 
 // one venation texture per pattern, shared by every leaf material
@@ -262,11 +265,14 @@ export function dressLevels(geos, levels, o = {}) {
     const group = new THREE.Group();
     for (const p of out[src].parts) group.add(new THREE.Mesh(p.geometry, p.material));
     const [cx, , cz] = o.center || [0, 0, 0];
-    const leaf = o.leaves?.colors?.[0];
+    // Cleared to the colour at the silhouette, so filtering there blends
+    // like with like: the foliage's, or the bark's on a leafless tree (the
+    // default green fringed every bare billboard).
+    const edge = o.leaves?.colors?.[0] ?? bark.userData.base;
     const { geometry, material } = bakeImpostor(o.renderer, group, {
       cx, cz, height: o.impostor?.height, views: o.impostor?.views,
       readback: o.impostor?.readback,
-      background: leaf ? new THREE.Color(leaf) : undefined,
+      background: edge ? new THREE.Color(edge) : undefined,
     });
     out[i].parts.push({ name: 'Billboard', geometry, material });
   });
